@@ -1,0 +1,103 @@
+﻿% CareerPilot Resume Template -- XeLaTeX + CJK Chinese Support
+% Based on LLM-Resume-Template & billryan/resume
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[top=1.2cm,bottom=1.2cm,left=1.5cm,right=1.5cm]{geometry}
+\usepackage{xeCJK}
+\usepackage{fontspec}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{tabularx}
+\usepackage{fancyhdr}
+
+\setCJKmainfont{STSong}
+\setmainfont{Times New Roman}
+
+\definecolor{primary}{RGB}{0, 82, 155}
+\definecolor{darkgray}{RGB}{80, 80, 80}
+\definecolor{lightgray}{RGB}{150, 150, 150}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=primary,
+    urlcolor=primary,
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\titleformat{\section}
+  {\Large\bfseries\color{primary}}
+  {}
+  {0em}
+  {}
+  [\titlerule]
+
+\titlespacing*{\section}{0pt}{8pt}{4pt}
+
+\setlist[itemize]{leftmargin=1.5em, itemsep=1pt, parsep=0pt, topsep=2pt}
+
+\begin{document}
+
+% ===== Header =====
+\begin{center}
+  {\Huge\bfseries << name >>}\\[6pt]
+  \textcolor{darkgray}{
+    << contact.email >> \quad
+    <% if contact.phone %><< contact.phone >> \quad<% endif %>
+    \href{<< contact.github >>}{GitHub} \quad
+    << basics_location >>
+  }
+\end{center}
+
+\vspace{-4pt}
+
+% ===== Summary =====
+\section{个人总结}
+<< summary >>
+
+% ===== Education =====
+<% if education %>
+\section{教育背景}
+<% for edu in education %>
+\noindent\textbf{<< edu.school >>} \hfill << edu.period >> \\
+<< edu.degree >> · << edu.major >> <% if edu.gpa %>\hfill GPA: << edu.gpa >><% endif %>
+
+<% endfor %>
+<% endif %>
+
+% ===== Skills =====
+\section{专业技能}
+\begin{itemize}
+  \item \textbf{编程语言}: << skills.languages | join(', ') >>
+  \item \textbf{框架/工具}: << skills.frameworks | join(', ') >>
+  \item \textbf{AI 知识}: << skills.ai_knowledge | join('; ') >>
+  \item \textbf{开发工具}: << skills.tools | join(', ') >>
+\end{itemize}
+
+% ===== Projects =====
+\section{项目经历}
+<% for proj in projects %>
+\noindent\textbf{<< proj.name >>} \hfill \textcolor{lightgray}{<< proj.period >>}\\
+\textit{<< proj.description >>}\\
+技术栈: << proj.technologies | join(', ') >>
+\begin{itemize}
+<% for h in proj.highlights %>
+  \item << h >>
+<% endfor %>
+\end{itemize}
+
+<% endfor %>
+
+% ===== Keywords =====
+<% if keywords_injected %>
+\section{关键词}
+\textcolor{lightgray}{\small << keywords_injected | join(' · ') >>}
+<% endif %>
+
+\end{document}
+

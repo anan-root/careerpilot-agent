@@ -1,0 +1,54 @@
+llm:
+  provider: deepseek
+  model: deepseek-v4-flash
+  base_url: https://api.deepseek.com
+  api_key: YOUR_DEEPSEEK_API_KEY  # 建议在 config.local.yaml 或环境变量中配置真实 Key
+  max_tokens: 4096
+  temperature: 0.7
+
+search:
+  default_location: 上海
+  default_keywords:
+    - AI Agent
+    - 大模型
+    - LLM
+    - NLP
+    - 人工智能
+  job_types:
+    - 社招
+    - 校招
+    - 实习
+  platforms:
+    - boss
+    - nowcoder
+    - liepin
+    - 51job
+    - zhilian
+
+scoring:
+  weights:
+    role_match: 0.20        # 门槛
+    skill_alignment: 0.20   # 门槛
+    salary: 0.10
+    location: 0.10
+    company_stage: 0.08
+    tech_stack: 0.08
+    growth_potential: 0.08
+    interview_difficulty: 0.06
+    timeline_match: 0.05
+    work_life_balance: 0.05
+  gate_threshold: 0.4
+
+resume:
+  latex_engine: xelatex
+  template: llm_agent
+  output_dir: data/outputs
+
+scheduler:
+  batch_start_hour: 22
+  batch_end_hour: 6
+  interval_minutes: 30
+
+notifications:
+  discord_webhook: ""
+  wechat_webhook: ""

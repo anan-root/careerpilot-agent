@@ -1,0 +1,33 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+venv/
+.venv/
+.env
+*.egg-info/
+dist/
+build/
+
+# LaTeX 中间文件
+*.aux
+*.log
+*.out
+*.synctex.gz
+
+# 本地数据、浏览器缓存、运行报告、数据库（不上传）
+data/**
+!data/
+!data/.gitkeep
+
+# 本地配置（含真实 API Key，不上传）
+config.local.yaml
+
+# Boss直聘浏览器 profile（含登录 Cookie，不上传）
+data/.boss_browser_profile/
+data/.browser_profiles/
+data/.boss_browser/
+data/.boss_cookies.txt
+
+# 临时搜索脚本（用户特定）
+search_hefei.py
