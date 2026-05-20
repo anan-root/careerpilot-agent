@@ -19,11 +19,10 @@ search:
     - 校招
     - 实习
   platforms:
-    - boss
-    - nowcoder
-    - liepin
-    - 51job
     - zhilian
+    - 51job
+    - liepin
+    - nowcoder
 
 scoring:
   weights:

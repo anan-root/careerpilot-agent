@@ -1,446 +1,380 @@
-# CareerPilot Agent — 完整调研计划
+# CareerPilot Agent 开发计划与路线图
 
-> 生成时间：2026-04-04
-> 状态：Phase 1-6 全部完成 ✅
+> 当前日期：2026-05-20
+> 当前状态：Agent MVP 已跑通，下一步进入界面产品化和项目发布打磨
 
----
+## 1. 产品定位
 
-## 项目概述
+CareerPilot Agent 是一个面向中文招聘市场的个人求职智能体。它不是单纯的爬虫脚本，而是围绕“上传简历、说出目标、让 Agent 帮你找岗位并解释下一步”的求职操作台。
 
-构建一个以 Agent 为核心交互形态的个人求职智能体，覆盖「岗位采集 → 简历画像 → 推荐决策 → 行动建议 → 求职记忆」链路，优先跑通「上海 AI/Agent 社招」这一完整示例，再逐步封装为可发布的新项目。
+默认目标场景：
 
-## 执行进度
+- 城市：上海
+- 方向：AI Agent、RAG、大模型应用、LLM 工程、AI 应用开发
+- 岗位类型：社招/全职
+- 默认平台：智联、51job、猎聘、牛客
+- 默认大模型：DeepSeek，OpenAI SDK 兼容调用方式
+- 默认安全策略：不自动打开交互式浏览器，不自动打开 Boss 登录页，不绕过登录、验证码或滑块
 
-| Phase | 内容 | 状态 |
-|-------|------|------|
-| Phase 1 | 初始化项目框架 + MiniMax API接入 + 个人YAML数据文件 | ✅ 完成 |
-| Phase 2 | 岗位采集引擎 — JobSpy集成 + Boss直聘爬虫 + 牛客抓取 + 公司分析 | ✅ 完成 |
-| Phase 3 | 简历生成引擎 — YAML->LaTeX->PDF管线 + LLM定制简历 + ATS优化 | ✅ 完成 |
-| Phase 4 | 面试资料生成 — 技能提取 + 学习路径 + 八股文 + 面经聚合 | ✅ 完成 |
-| Phase 5 | 端到端Demo — 以武汉大厂AI实习为例跑通全流程 + 批量模式 | ✅ 完成 |
-| Phase 6 | 封装发布 — OpenClaw Skill + MCP + CLI + 文档 + Web前端预备 | ✅ 完成 |
-| Phase 7 | Web平台 — Next.js + 用户系统 + 多地区支持 | 🔜 待执行 |
+一句话目标：
 
----
+> 上传简历，说出求职目标，CareerPilot Agent 自动规划搜索、采集岗位、筛选机会、解释匹配原因、生成简历优化和面试建议，并沉淀可复盘的本地求职记忆。
 
-## 一、全网调研成果总览（50+ 优秀案例深度学习）
+## 2. 当前已实现能力
 
-### 1.1 岗位采集 & 自动投递类（13个项目）
+### 2.1 Agent 搜索链路
 
-**中国求职平台专用：**
+已实现目标驱动搜索：
 
-- [JobClaw](https://github.com/slothsheepking/jobclaw) (Python, 49 stars) — Boss直聘/LinkedIn 自动抓取+LLM匹配+批量投递，防封机制(随机延迟3-8s/日限100次/僵尸岗过滤)，支持Claude OAuth免费方案
-- [GeekGeekRun 牛人快跑](https://github.com/nicedayzhu/geekgeekrun) — Boss直聘专用，可视化界面+LLM集成+已读不回提醒
-- [Get Jobs](https://github.com/loks666/get_jobs) (Java) — 多平台(Boss/猎聘/拉勾/51job/智联)，定时投递+企业微信推送
-- [AI工作猎手 ai-job](https://github.com/yangfeng20/ai-job) (Java+Vue) — AI坐席自动回复HR+智能挽留+邮件通知+Spring Boot 3
-- [boss_batch_push](https://github.com/yangfeng20/boss_batch_push) (JS, 790 stars) — Boss批量投递+词云分析，油猴脚本
-- [海投助手 Jobs_helper](https://github.com/YangShengzhou03/Jobs_helper) (JS, 220 stars) — AI智能回复+可视化面板+防重复
+- 用户输入一句话目标，例如“帮我找上海 AI Agent 社招，薪资 20K 以上，3 年以内，双休优先，不要实习不要校招”。
+- `Search Strategy Agent` 解析城市、关键词、平台、岗位类型、薪资、经验、学历、双休偏好和排除词。
+- `Career Orchestrator` 调度简历画像、记忆读取、平台采集、岗位排序、报告生成和运行记录。
+- 默认城市为上海。
+- 默认岗位类型为社招。
+- 默认平台为 `zhilian`、`51job`、`liepin`、`nowcoder`。
+- 默认不开浏览器、不触发 Boss 登录。
 
-**国际求职平台专用：**
+相关文件：
 
-- [AIHawk Jobs_Applier_AI_Agent](https://github.com/feder-cr/Jobs_Applier_AI_Agent) (Python, **29.5k stars** — 全网最火) — LinkedIn自动投递，50+岗位/小时，TechCrunch/Wired报道
-- [ApplyPilot](https://github.com/Pickle-Pixel/ApplyPilot) — **6阶段全自动管线**: Discover(5平台+48个Workday) -> Enrich -> Score -> Tailor -> CoverLetter -> Apply，2天投递1000个岗位
-- [JobSentinel](https://github.com/cboyd0319/JobSentinel) (Rust+TS) — 监控13平台+智能评分(技能40%+薪资25%+地点20%+公司10%+新鲜度5%)+鬼工作检测
+- `agents/search_strategy_agent.py`
+- `agents/career_orchestrator.py`
+- `crawlers/aggregator.py`
+- `job_filters.py`
 
-**混合/聚合平台：**
+### 2.2 多平台岗位采集
 
-- [JobSpy/python-jobspy](https://github.com/speedyapply/JobSpy) (Python, **3.1k stars**) — LinkedIn/Indeed/Glassdoor/Google Jobs/ZipRecruiter 聚合爬虫库，23万+月下载（不支持Boss直聘）
-- [apply-potato](https://github.com/coolbrother/apply-potato) — GitHub招聘仓库监控+GPT提取+Gmail状态追踪+Google Sheets+Discord通知，完全本地运行
-- [Job Scout](https://github.com/8do-abehn/job-scout) — GitHub Actions定时爬取+GitHub Issues追踪应用状态（to-review/applied/interviewing/offer）+MCP Server
-- [JoBoom](https://github.com/careerboomAI/JoBoom) (Next.js 16) — 跨LinkedIn/Indeed/Upwork聚合搜索+CV解析
+已接入并聚合：
 
-**关键学习点：**
+- 智联招聘
+- 51job/前程无忧
+- 猎聘
+- 牛客
+- Boss 非交互/显式授权/兜底方案
 
-- ApplyPilot的6阶段管线是最完整的自动化流程设计
-- AIHawk证明了自动投递的巨大需求(29.5k stars)
-- JobSpy是最成熟的多平台爬虫库，但不支持中国平台，需要Playwright方案补充
-- Job Scout的GitHub Actions + Issues方案是低成本的自动化追踪
+当前策略：
 
-### 1.2 MCP/Skill 求职服务类（7个项目）
+- 默认不把交互式 Boss 登录作为搜索入口。
+- 平台越多时，原始候选会增加，但最终展示会继续经过去重、岗位类型、薪资、经验、学历、双休、排除词和排序筛选。
+- 搜索摘要会解释每个平台抓取数、筛选后数量、最终展示数量和字段完整度。
 
-- [ClawJob](https://clawjob.upcv.tech/) — OpenClaw 原生求职Skill，**6个Skill+20个MCP工具**：resume-create/edit、campus-search、job-search、job-monitor、auto-apply，兼容Cursor/Claude Code/Windsurf，简历实时同步到网页端
-- [job-search-mcp](https://github.com/openclaw/skills/blob/main/skills/amoghpurohit/job-search-mcp/SKILL.md) — OpenClaw Skill，集成JobSpy的`scrape_jobs_tool`搜索8平台（LinkedIn/Indeed/Glassdoor/Google/ZipRecruiter/Bayt/Naukri/BDJobs）
-- [JobGPT MCP](https://github.com/6figr-com/jobgpt-mcp-server) — **34个工具**覆盖求职全流程：搜索+自动投递+简历定制+应用追踪+招聘外联，支持Claude/Cursor/Windsurf/Continue
-- [Placed MCP](https://github.com/exidian-tech/placed-mcp) — **47个工具**：37简历模板(测试50+ATS系统)+模拟面试(技术/系统设计/行为)+LinkedIn优化+薪资谈判
-- [interview-mcp-server](https://github.com/HelloGGX/interview-mcp-server) — 简历PDF解析+AI生成面试题+实时对话录音+自动评估报告(多维度)
-- [resume-tailoring-skill](https://github.com/varunr89/resume-tailoring-skill) (192 stars) — Claude Code Skill，公司文化调研+对话式经历发现+信心评分匹配+批量处理3-5个相似岗位
-- [interview-coach-skill](https://github.com/noamseg/interview-coach-skill) (**833 stars**) — **23个命令**覆盖求职全生命周期：5维度评分(Substance/Structure/Relevance/Credibility/Differentiation)+故事银行(STAR)+8阶段训练+多格式面试转录分析(Otter/Zoom/Grain/Teams)+评分漂移校准
+相关文件：
 
-**关键学习点：**
+- `crawlers/zhilian.py`
+- `crawlers/job51.py`
+- `crawlers/liepin.py`
+- `crawlers/nowcoder.py`
+- `crawlers/boss*.py`
+- `crawlers/detail_enricher.py`
 
-- ClawJob的6 Skill + 20 MCP工具的设计模式是OpenClaw Skill开发的标杆
-- interview-coach-skill的5维度评分+故事银行+评分漂移校准非常专业
-- resume-tailoring-skill的"对话式经历发现"很创新 — 通过提问发掘用户未写入简历的经历
+### 2.3 简历画像与岗位匹配
 
-### 1.3 简历生成类（12个项目）
+已实现：
 
-**LaTeX管线类：**
+- 上传 PDF、DOCX、TXT 简历后提取文本。
+- 生成结构化简历画像。
+- 对岗位进行本地匹配评分。
+- 对岗位输出推荐等级：强推、可投、谨慎、不建议。
+- 解释匹配理由、缺口、风险、简历动作和面试准备重点。
+- DeepSeek 精评不可用时自动回退到本地规则建议。
 
-- [cv-pipeline](https://github.com/jsoyer/cv-pipeline) (Python, 99通过测试) — **最成熟的YAML->AI->LaTeX->PDF管线**：67个脚本+14个CI/CD工作流+5种AI(Gemini/Claude/OpenAI/Mistral/Ollama)+ATS评分，曾用于投递Anthropic
-- [LLM-Resume-Template](https://github.com/adongwanai/LLM-Resume-Template) (166 stars) — **专为LLM/Agent岗设计**的LaTeX模板，含头像/科研/实习/项目板块，支持Overleaf
-- [billryan/resume](https://github.com/billryan/resume) (**10.9k stars**) — 经典中英文LaTeX简历模板，CJK支持+FontAwesome
-- [Roger](https://github.com/marswangyang/Roger) — Python+LaTeX+Gemini，按JD自动定制简历和求职信
-- [GitHired](https://github.com/Herc-Ch/GitHired) — 从GitHub仓库自动拉取信息+LangChain生成简历
+相关文件：
 
-**Resume as Code 理念：**
+- `agents/profile_agent.py`
+- `agents/ranking_agent.py`
+- `agents/advice_agent.py`
+- `agents/resume_matcher.py`
 
-- [resume-as-code](https://github.com/xiaohanyu/resume-as-code) / [YAMLResume](https://yamlresume.dev/) — **"简历即代码"**: 维护单一YAML职业Timeline，3个AI Agent(Timeline Polishing/Resume Generation/Interview Preparation)按STAR法则润色，支持9种语言，GitHub Actions自动化构建
-- [ResumeAgent](https://github.com/ApplyU-ai/ResumeAgent) (TypeScript) — 4大功能：Resume Transformer(4模板) + Resume Tailor(零编造) + **Resume Heatmap**(简历-JD对齐热力图) + Resume Parser
+### 2.4 求职记忆、运行记录和报告
 
-**Claude Code简历插件：**
+已实现本地记忆：
 
-- [ats-resume-agent](https://github.com/NullSpace-BitCradle/ats-resume-agent) — **零编造政策**：每项成就必须有来源证明，LaTeX PDF输出+ATS优化
-- [claude-resume-kit](https://github.com/ARPeeketi/claude-resume-kit) — **8维度多视角评审**(5种读者人格：ATS Bot/HR/技术评审/...)+反编造控制(出处标记/动词纪律/更正日志)+分离Claude Code会话减少偏差
-- [resume-tailor-plugin](https://github.com/olegvg/resume-tailor-plugin) — Gap Analysis表(匹配/缺口/差异化)+ATS评分+地区惯例适配(EN-US/RU-CIS)+反模式保护
-- [JobPilot](https://github.com/waltershalon/jobpilot) — Claude API定制+爬取+ATS分析+LaTeX/DOCX输出+React前端实时预览+FastAPI后端
+- 简历画像
+- 搜索历史
+- 岗位反馈
+- 投递状态
+- Agent 任务运行记录
+- 每次搜索的 Markdown 报告
 
-**AI防编造最佳实践（来自 claude-resume-kit）：**
+每次 Agent 搜索会生成：
 
-- Provenance flags: published / under review / internal
-- Verb discipline: 防止过度吹嘘
-- Corrections log: 修正过的错误不会重新出现
-- 每步使用独立Claude Code会话，防止上下文污染
+- `run_id`
+- 执行步骤
+- 搜索计划
+- 平台质量摘要
+- 推荐分布
+- Top 岗位摘要
+- 报告路径
 
-**关键学习点：**
+相关文件：
 
-- cv-pipeline是工程化程度最高的(67脚本+14 CI/CD)，直接复用其管线设计
-- resume-as-code的"简历即代码"理念最优雅 — 维护一份YAML，生成N份定制简历
-- ResumeAgent的热力图功能非常直观 — 可视化简历与JD的匹配度
-- claude-resume-kit的8维度评审+5种读者人格评分系统最专业
-- 零编造政策对于实习简历可选，但对于有经验的求职者很重要
+- `memory/store.py`
+- `agents/memory_agent.py`
+- `agents/report_agent.py`
+- `agents/conversation_agent.py`
 
-### 1.4 面试资料 & 模拟面试类（10个项目）
+### 2.5 交互界面和 CLI
 
-**面试题库/学习指南：**
+已实现 Streamlit 前端：
 
-- [LLM-Agent-Interview-Guide](https://github.com/Lau-Jonathan/LLM-Agent-Interview-Guide) — **300+题，9大模块，字节Top20高频题**，3-5天/模块学习路径
-- [ai-interview-guide](https://github.com/guocong-bincai/ai-interview-guide) — 245+题，18模块，**4级难度**(基础->应用->优化->架构)+90+代码示例
-- [AgentGuide](https://github.com/adongwanai/AgentGuide) (**2928 stars**) — 对标JavaGuide，**1000+题库**，8-10周学习路径，双线(算法岗+开发岗)+简历级项目+6步求职方法论
-- [ai-agents-from-zero](https://github.com/didilili/ai-agents-from-zero) — 从零到企业级(LangChain/LangGraph/RAG/MCP/多模态/微调)+可运行源码+提示词模板
-- [Agent-100-Days](https://github.com/flingjie/Agent-100-Days) — 15周系统学习：Week1-2 LLM原理 -> Week3-7 Prompt/RAG/记忆 -> Week8-11 Agent模式 -> Week12-15 综合项目
-- 你自己的 [ai-agent-interview-guide](https://github.com/bcefghj/ai-agent-interview-guide) (104 stars) — 200+面试题+企业级项目+简历模板+STAR面试稿+哆啦A梦漫画
+- Agent 目标输入
+- 简历上传
+- 搜索计划展示
+- Agent 执行步骤
+- 求职记忆摘要
+- 岗位表格视图
+- 岗位卡片视图
+- Agent 搜索报告下载
+- 最近 Agent 任务
+- 基于当前结果的 Agent 问答
+- 单岗位简历优化和面试建议
 
-**AI模拟面试系统：**
+已实现 CLI：
 
-- [The-Interview-Mentor](https://github.com/ps06756/The-Interview-Mentor) — **40个面试官Agent**覆盖系统设计(URL缩短器/搜索引擎/Uber)/编程(数组/链表/DP)/ML/DevOps/行为面试，不接受模糊回答会追问细节，自适应难度
-- [Friday](https://github.com/mostofashakib/Friday) — **LangGraph多Agent语音面试**：Interviewer(Opus生成题目) + Grader(Sonnet评分1-5) + Follow-up(RAG检测知识弱点) + Coach(Haiku实时指导)，Next.js 15前端+ElevenLabs TTS
-- [interview-coach-skill](https://github.com/noamseg/interview-coach-skill) (833 stars) — 23命令全生命周期：5维度评分+故事银行+**8阶段训练进阶**+4-6题模拟面试(行为/系统设计/Case/Panel)+多格式转录分析
-- [AI-Interviewer](https://github.com/sujalthapa369/AI-Interviewer) — React+Flask，NLP驱动题目生成+答案评估+性能分析仪表盘
+- `python cli.py agent-search "..."`
+- `python cli.py agent-runs --limit 5`
+- `python cli.py agent-ask "为什么结果这么少"`
+- `python cli.py llm-status --test`
+- `python cli.py crawl ...`
+- `python cli.py match-resume ...`
+- `python cli.py advise-resume ...`
 
-**牛客/小红书真实面经（字节/阿里/腾讯 2026）：**
+相关文件：
 
-- 项目拷打：Agent编排/混合记忆架构/RAG存储/Token优化
-- 技术深度：LangGraph/多模态/LoRA微调/MCP vs Function Calling
-- 基础技术：HashMap/MySQL事务/Redis/Kafka/算法题
-- 高频考点：GRPO原理/Self-Attention/KV Cache/手写Attention/RAG全流程/Agent记忆系统
+- `app.py`
+- `cli.py`
 
-**关键学习点：**
+### 2.6 DeepSeek 默认配置
 
-- AgentGuide(2928 stars)的6步求职方法论 + 双线(算法岗/开发岗)路径设计最系统
-- The-Interview-Mentor的"不接受模糊回答"设计理念值得借鉴 — 真正的面试官会追问
-- Friday的4-Agent语音面试架构是技术标杆(Interviewer/Grader/Follow-up/Coach)
-- interview-coach-skill的评分漂移校准很巧妙 — 3次真实面试后自动校准AI评分
+当前默认大模型配置：
 
-### 1.5 多Agent求职编排系统（5个项目）
+- provider：`deepseek`
+- model：`deepseek-v4-flash`
+- base_url：`https://api.deepseek.com`
+- API Key 来源：优先 `config.local.yaml`，也支持环境变量
 
-- [Career-Ops](https://dev.to/santifer/i-built-a-multi-agent-job-search-system-with-claude-code-631-evaluations-12-modes-2cd0) — **12个Claude Code Skill模式**(auto-pipeline/oferta/batch/pdf/scan/apply等)，**10维评分**(角色匹配+技能对齐为门槛)，631次评估中74%低于4.0被过滤，批量122+ URL并行+容错
-- [Job-Hunter](https://github.com/ryan-griego/job-hunter) (Nuxt4+Python) — 10个专用Agent+MongoDB+SSE实时监控
-- [Job Agent Toolkit](https://github.com/Acidlambunk/Job-Agent) — MCP工具+LangGraph编排+FastAPI
-- [Matt Sayar的4-Agent架构](https://mattsayar.com/orchestrating-ai-agents-for-job-searching/) — find-leads + customize-resume + find-decision-makers + generate-loom-script，**Google Sheet为中央协调枢纽**
-- [Claude-Job-Search-Strategist](https://github.com/danielrosehill/Claude-Job-Search-Strategist) — 结构化工作区模板：user-context/ + inputs/ + outputs/ + agents/ + processes.json，斜杠命令约定(/agent, /queue, /resume-tailor, /cover-letter)
+真实 Key 只放本地，不提交 GitHub。
 
-**关键学习点：**
+相关文件：
 
-- Career-Ops的"10维评分+门槛机制"最科学 — 角色匹配和技能对齐不达标直接过滤
-- Matt Sayar的Google Sheet中央协调很实用 — 多Agent通过共享表格协作
-- Claude-Job-Search-Strategist的目录结构设计很清晰 — 输入/输出/Agent分离
+- `llm_client.py`
+- `config.yaml`
+- `config.local.yaml`（本地私密文件，已被 `.gitignore` 忽略）
 
-### 1.6 求职追踪 & 仪表盘类（4个项目）
+## 3. 当前架构
 
-- [JobSync](https://github.com/Gsync/jobsync) (Next.js, **468 stars**) — 自托管求职追踪+AI简历评审+匹配+分析，Docker部署
-- [JobTrackerPro](https://github.com/thughari/JobTrackerPro) (Java/Angular) — 企业级，Gemini 2.0 Flash自动解析邮件+零操作追踪
-- [ai-job-tracker](https://github.com/lbwalton/ai-job-tracker) — OpenAI分析+Gmail集成+Google Sheets+CSV导出
-- [Resume-Matcher](https://github.com/srbhr/Resume-Matcher) (**26.5k stars**) — 简历关键词匹配+改进建议，多语言
-
-### 1.7 小红书/牛客爬虫工具（4个项目）
-
-- [xiaohongshu-skill](https://github.com/DeliciousBuding/xiaohongshu-skill) — Playwright+兼容Claude Code/OpenClaw，搜索/帖子/评论+反爬保护
-- [redbook-cli](https://github.com/Youhai020616/xiaohongshu) — AI驱动小红书自动化，搜索/发布/互动/分析，MCP+CDP双引擎
-- [LittleCrawler](https://github.com/pbeenigg/LittleCrawler) (684 stars) — 小红书/知乎/闲鱼异步爬虫，多存储(JSON/SQLite/MySQL/MongoDB)
-- 牛客网官方API: https://docs.nowcoder.com/ — OAuth2.0认证，可获取招聘日程
-
-### 1.8 行业痛点分析（来自2026年市场调研）
-
-**求职者核心痛点：**
-
-- 简历适配效率低：手动改写2小时+/岗位，关键词对齐困难
-- 信息碎片化：岗位散落在Boss/猎聘/牛客/小红书，无法统一管理
-- 面试准备无方向：不知道该学什么，八股文海量但缺乏针对性
-- 公司信息不透明：薪资/加班/文化等信息需多平台对比
-
-**现有工具不足：**
-
-- 投递类工具多但简历定制弱（大多只有投递，没有简历生成）
-- 面试准备类工具和投递类工具完全割裂
-- 中国求职平台(Boss/牛客)的MCP/Skill支持几乎为零
-- 没有"岗位采集->简历定制->面试准备->投递"的完整闭环工具
-
----
-
-## 二、你的竞争优势分析
-
-根据GitHub（62 followers, 250+ stars 的 claude-code 指南, 104 stars 的 ai-agent-interview-guide），你在AI Agent领域的积累：
-
-- **claude-code-complete-guide** (250 stars) — 深度理解AI Agent架构
-- **ai-agent-interview-guide** (104 stars) — 已有200+面试题+企业级项目+简历模板
-- **learn-minimind** (66 stars) — LLM训练全流程理解
-- **miniClaudeCode** (40 stars) — Agent架构最小复现
-- **ClaudeCode-Source-Analysis** (33 stars) — 源码分析能力
-
-**独特价值**：你是少数同时具备"AI Agent深度理解"和"求职内容创作能力"的开发者。武汉光谷2026新政按GitHub星标认定人才，你的GitHub profile本身就是竞争力。
-
----
-
-## 三、系统架构设计
-
-### 3.1 总体架构（5层）
-
-```
-输入层: 个人YAML数据 + 岗位URL/关键词 + 偏好配置
-  ↓
-数据采集层: Boss直聘(Playwright) + 牛客网API + JobSpy(国际) + 小红书面经 + Firecrawl
-  ↓
-核心引擎层(MiniMax M2.7):
-  ├── JD分析器 (技能提取+关键词)
-  ├── 10维评分器 (门槛+加权)
-  ├── 公司画像 (薪资/评价/加班)
-  ├── 简历引擎 (YAML->AI定制->LaTeX->PDF)
-  ├── 面试引擎 (八股+面经+学习路径)
-  └── 故事银行 (STAR法则经历库)
-  ↓
-输出层: LaTeX PDF简历 + 面试准备包 + 公司报告 + 投递指南 + 学习计划
-  ↓
-部署层: CLI工具 + OpenClaw Skill(SKILL.md) + MCP Server(6个工具) + 定时任务 + Web应用
+```mermaid
+flowchart TD
+    U["用户目标 + 简历"] --> O["Career Orchestrator"]
+    O --> P["Profile Agent"]
+    O --> M["Memory Agent"]
+    O --> S["Search Strategy Agent"]
+    S --> C["Crawler Tools"]
+    C --> F["Filters + Detail Enricher"]
+    F --> R["Ranking Agent"]
+    R --> A["Advice Agent"]
+    R --> G["Report Agent"]
+    G --> Q["Conversation Agent"]
+    M --> S
+    M --> R
 ```
 
-### 3.2 5个专用Agent职责
+核心思想：
 
-- **ScoutAgent**: 多平台岗位采集 + 去重 + 新岗位监控
-- **AnalystAgent**: JD解析 + 10维评分(借鉴Career-Ops) + 公司画像
-- **TailorAgent**: YAML经历匹配 + STAR润色 + LaTeX生成 + ATS优化
-- **CoachAgent**: 技能差距分析 + 学习路径 + 八股文 + 模拟面试题
-- **TrackerAgent**: 投递状态追踪 + 进度汇报 + 新岗位提醒
+- Orchestrator 负责任务编排。
+- Search Strategy Agent 负责把自然语言目标变成可执行搜索计划。
+- Crawler Tools 负责多平台采集和字段补全。
+- Ranking Agent 负责推荐等级和风险解释。
+- Advice Agent 负责单岗位行动建议。
+- Memory Agent 负责让系统记住用户画像、反馈和投递进展。
+- Report/Conversation Agent 负责让结果可复盘、可追问。
 
-### 3.3 10维岗位评分系统（借鉴Career-Ops）
+## 4. 数据与隐私边界
 
-| 维度 | 说明 | 类型 |
-|------|------|------|
-| 角色匹配度 | 岗位方向是否匹配AI/Agent | 门槛 |
-| 技能对齐度 | 必需技能的覆盖率 | 门槛 |
-| 薪资竞争力 | 日薪/月薪对比市场水平 | 加权 |
-| 地理便利性 | 是否在武汉/可远程 | 加权 |
-| 公司发展阶段 | 大厂/独角兽/创业公司 | 加权 |
-| 团队技术实力 | 技术栈先进度 | 加权 |
-| 成长潜力 | 转正可能/晋升空间 | 加权 |
-| 面试难度 | 预估通过率 | 加权 |
-| 时间匹配 | 实习时间/开始日期 | 加权 |
-| 综合加班评价 | 工作生活平衡 | 加权 |
+本地私密数据不上传 GitHub：
 
----
+```text
+config.local.yaml
+data/jobs.db
+data/memory/
+data/outputs/
+data/.browser_profiles/
+data/.boss_browser_profile/
+```
 
-## 四、技术选型
+提交到 GitHub 的只应该是：
 
-| 模块 | 技术 | 说明 |
-|------|------|------|
-| LLM | MiniMax M2.7 | `base_url="https://api.minimaxi.com/v1"` + OpenAI SDK兼容 |
-| 语言 | Python 3.11+ | 主语言 |
-| 简历管线 | YAML + Jinja2 + XeLaTeX | `brew install basictex && tlmgr install ctex fontspec xecjk` |
-| LaTeX模板 | LLM-Resume-Template + billryan/resume | AI岗专用 + 通用中文 |
-| 岗位采集 | Playwright + JobSpy + Firecrawl | Boss直聘/牛客/国际平台 |
-| 面经采集 | xiaohongshu-skill + 牛客API | 小红书面经 + 牛客招聘 |
-| 数据存储 | SQLite + JSON | 本地存储 |
-| MCP框架 | Python MCP SDK | `pip install mcp` |
-| Skill框架 | OpenClaw SKILL.md | trigger + tools + markdown body |
-| 自动化 | APScheduler + GitHub Actions | 定时任务 + CI/CD |
-| Web前端 | Next.js 15 + Tailwind + Shadcn UI | 后期网站 |
-| 通知 | Discord Webhook / 企业微信 | 实时提醒 |
+- 源码
+- 示例配置
+- 文档
+- 依赖声明
+- 不含真实个人信息的模板或占位数据
 
----
+原则：
 
-## 五、实施路线（7个阶段）
+- API Key 不写入代码。
+- 不提交真实简历、搜索记录、岗位数据库和浏览器 Cookie。
+- 不绕过招聘平台登录、验证码、滑块或安全策略。
+- 平台没有公开的字段必须标记未知，不能编造。
 
-### Phase 1: 基础框架 + MiniMax接入 + 个人数据 ✅
+## 5. 已完成里程碑
 
-**目标**: 搭建项目骨架，让LLM能用起来
+| 阶段 | 内容 | 状态 |
+| --- | --- | --- |
+| Phase 1 | Agent 骨架：Search Strategy Agent + Career Orchestrator | 已完成 |
+| Phase 2 | 简历画像：Profile Agent + 本地画像存储 | 已完成 |
+| Phase 3 | 岗位决策：Ranking Agent + 推荐等级 + 风险解释 | 已完成 |
+| Phase 4 | 行动建议：Advice Agent + 简历优化 + 面试建议 | 已完成 |
+| Phase 5 | 求职记忆：Memory Store + 反馈/投递/搜索历史 | 已完成 |
+| Phase 5.5 | 报告与问答：Report Agent + Conversation Agent + run_id | 已完成 |
+| Phase 6 | 初版 Streamlit 操作台：表格/卡片/报告/问答 | 已完成 |
+| Phase 7 | 项目独立化：重命名、README、GitHub 发布 | 进行中 |
 
-- 初始化 `jobforge/` 项目结构
-- MiniMax M2.7 API 接入（OpenAI SDK兼容）
-- 创建 `data/profile.yaml`（Resume as Code 个人数据）
-- 安装LaTeX环境
+## 6. 下一步路线图
 
-### Phase 2: 岗位采集引擎 ✅
+### Phase 7：项目独立化完善
 
-**目标**: 采集武汉AI/Agent实习的所有岗位
+目标：让仓库从旧项目彻底变成 CareerPilot Agent。
 
-- Boss直聘 Playwright 爬虫（防封机制）
-- 牛客网校招/实习岗位 API 对接
-- 猎聘/智联关键词搜索
-- 公司信息聚合 → 公司画像
-- 10维评分系统
-- SQLite 结构化存储
+待做：
 
-### Phase 3: 简历生成引擎（LaTeX PDF） ✅
+- 清理旧 Demo 脚本或移动到 `legacy/`。
+- 增加演示截图。
+- 增加最小示例数据，不包含真实用户隐私。
+- 补充 GitHub 首页说明和安全边界。
+- 给核心模块补少量单元测试。
 
-**目标**: 输入JD，输出定制简历PDF
+验收：
 
-- YAML -> Jinja2 -> LaTeX -> PDF 管线
-- LLM-Resume-Template 集成
-- MiniMax M2.7 驱动简历定制（JD关键词提取 + STAR润色 + ATS优化）
-- 首跑：金山软件武汉AI实习 → 简历PDF ✅
+- 新用户打开 README 能直接理解这是 Agent 项目。
+- `PLAN.md`、`docs/PRODUCT_DESIGN.md`、`README.md`、`skill/SKILL.md` 口径一致。
+- 仓库不包含真实 API Key、真实简历、浏览器 Cookie 或本地数据库。
 
-### Phase 4: 面试资料生成引擎 ✅
+### Phase 8：界面产品化
 
-**目标**: 输入JD，输出从零到面试的完整资料包
+目标：把 Streamlit 从“能用”升级成“像产品”。
 
-- JD → 技能树提取（必需/加分/基础）
-- 学习路径（N周计划）
-- 八股文速查手册
-- 模拟面试题（不接受模糊回答风格）
-- 首跑：金山软件岗位面试资料包 ✅
+待做：
 
-### Phase 5: 端到端Demo跑通 ✅
+- 三栏布局：左侧目标和筛选，中间岗位结果，右侧 Agent 解释和行动建议。
+- 条件变化提示：当用户改平台、页数、筛选条件时，明确标记当前结果是否来自上一次搜索。
+- 更清晰的搜索过程：展示每个平台抓取、合并、过滤、最终展示数量。
+- 岗位详情面板：公司地址、经验、学历、双休、福利、风险、推荐理由放到同一处。
+- 报告下载和最近任务入口更醒目。
 
-**目标**: 以武汉大厂AI实习为例，完整跑通全流程
+验收：
 
-- 目标：金山软件武汉AI Agent实习
-- 管线：岗位采集 → 公司画像 → 10维评分 → 简历PDF → 面试资料包 → 打招呼语
-- 批量模式：夜间APScheduler自动调度
+- 用户可以自然完成“上传简历 → 输入目标 → 搜索 → 看推荐 → 生成建议 → 记录状态”。
+- 改动平台、页数或筛选条件后，界面能明确提示是否需要重新搜索。
 
-### Phase 6: 封装为OpenClaw Skill + MCP ✅
+### Phase 9：面试准备工作台
 
-**目标**: 让别人也能用
+目标：把“单岗位建议”扩展成真正的面试准备系统。
 
-SKILL.md 封装（5个Skill命令）：
-- `/jobforge-search` — 搜索岗位
-- `/jobforge-analyze` — 分析岗位+评分
-- `/jobforge-resume` — 生成定制简历
-- `/jobforge-interview` — 生成面试资料
-- `/jobforge-pipeline` — 端到端全流程
+待做：
 
-MCP Server（6个工具）：
-- `jobforge_search` / `jobforge_analyze` / `jobforge_company`
-- `jobforge_resume` / `jobforge_interview` / `jobforge_greeting`
+- 按岗位生成技能树。
+- 生成针对岗位的面试题。
+- 生成项目追问清单。
+- 生成 30 秒/1 分钟自我介绍。
+- 记录练习结果和薄弱点。
+- 后续支持多轮模拟面试。
 
-CLI工具：`python cli.py run/search/batch/list-jobs`
+验收：
 
-### Phase 7: Web平台 🔜
+- 选择一个岗位后，用户能得到一份可执行的面试准备包。
+- 建议只基于简历事实和岗位要求，不编造经历。
 
-**目标**: 部署网站，支持不同地区/岗位的用户
+### Phase 10：更强 Agent Loop
 
-- Next.js 15 + Tailwind + Shadcn UI
-- 用户系统：注册/登录/个人数据
-- 多地区支持：不限于武汉
-- 应用追踪仪表盘
-- 部署：Vercel / 阿里云
+目标：让 Agent 不只是一次性执行，而是能在多轮对话里持续调整策略。
 
----
+待做：
 
-## 六、核心借鉴清单（精选每个方向最优案例）
+- 根据用户反馈调整关键词、平台和筛选条件。
+- 支持“为什么不推荐这个岗位”“把这个岗位加入对比”“按通勤重新排序”等追问。
+- 支持一轮任务内多次重排和解释。
+- 支持从运行报告中恢复上下文。
 
-### 架构设计
+验收：
 
-| 项目 | 借鉴内容 |
-|------|---------|
-| Career-Ops | 12模式Skill架构 + 10维评分门槛机制 + 批量并行处理 |
-| Matt Sayar | 4-Agent + Google Sheet中央协调 |
-| Claude-Job-Search-Strategist | 输入/输出/Agent分离的目录结构 |
-| ApplyPilot | 6阶段自动化管线(Discover->Enrich->Score->Tailor->CoverLetter->Apply) |
+- 用户能围绕一次搜索连续追问，不需要反复手动整理上下文。
 
-### 简历生成
+### Phase 11：可选部署与自动化
 
-| 项目 | 借鉴内容 |
-|------|---------|
-| cv-pipeline | YAML->AI->LaTeX->PDF管线(67脚本+ATS评分) |
-| resume-as-code | "简历即代码"理念 + STAR法则Timeline Polishing |
-| ResumeAgent | 简历-JD热力图可视化 |
-| claude-resume-kit | 8维度5视角评审 + 反编造控制 |
+目标：在不牺牲隐私和安全的前提下，提供更稳定的运行方式。
 
-### 面试准备
+待做：
 
-| 项目 | 借鉴内容 |
-|------|---------|
-| AgentGuide | 6步求职方法论 + 1000+题库 + 双线路径 |
-| The-Interview-Mentor | 40个面试官Agent + 不接受模糊回答 |
-| interview-coach-skill | 5维度评分 + 故事银行 + 8阶段训练 |
-| Friday | LangGraph 4-Agent语音面试(Interviewer/Grader/Follow-up/Coach) |
+- 本地部署文档。
+- 可选定时搜索。
+- 可选消息提醒。
+- 可选 MCP 工具完善。
+- 可选 Docker 化。
 
-### 岗位采集
+暂不做：
 
-| 项目 | 借鉴内容 |
-|------|---------|
-| JobClaw | Boss直聘Playwright + 防封机制(随机延迟+日限+僵尸过滤) |
-| JobSpy | 多平台聚合爬虫(3.1k stars) |
-| Job Scout | GitHub Actions定时 + Issues追踪 |
+- 自动批量投递。
+- 自动代聊 HR。
+- 绕过登录、验证码或滑块。
+- 云端多用户和付费系统。
 
-### OpenClaw/MCP
+## 7. 当前限制与风险
 
-| 项目 | 借鉴内容 |
-|------|---------|
-| ClawJob | 6 Skill + 20 MCP工具的设计模式 |
-| resume-tailoring-skill | 对话式经历发现 + 批量处理 |
+| 风险 | 表现 | 当前策略 |
+| --- | --- | --- |
+| 平台反爬 | 结果少、字段缺失、详情页失败 | 展示字段完整度和失败状态，不伪造 |
+| 登录限制 | Boss 或部分详情字段拿不到 | 默认不登录，只在用户显式授权后尝试 |
+| 平台选择越多但结果不增 | 去重和筛选后最终候选变少 | 报告中展示原始抓取、筛选后和最终分布 |
+| 双休字段缺失 | 列表页不公开或详情页受限 | 标记未知，给出风险说明 |
+| LLM 不稳定 | API Key、网络、额度问题 | DeepSeek 默认，失败后回退本地规则建议 |
+| 简历建议编造 | 模型可能扩写过度 | 零编造原则，只基于简历事实给建议 |
 
----
+## 8. 测试与验证清单
 
-## 七、MiniMax M2.7 额度与成本规划
+基础验证：
 
-- 每月 4500 次调用 / 5小时（每周10倍 = 45000次/50小时）
-- `base_url="https://api.minimaxi.com/v1"` + OpenAI SDK
-- 单个岗位全流程约 8-15 次调用（JD分析2次 + 简历生成3次 + 面试资料5次 + 评分2次）
-- 每周可处理 **3000-5600 个岗位**，完全够用
-- 低峰时段(夜间) 100TPS，适合批量处理
-- 建议：每晚22:00-06:00运行批量任务，利用低峰高速
+```powershell
+python -m compileall app.py cli.py agents memory crawlers mcp_server
+python cli.py llm-status --test
+```
 
----
+Agent 搜索：
 
-## 八、项目独特卖点（对比现有工具的差异化）
+```powershell
+python cli.py agent-search "帮我找上海 AI Agent 社招，薪资 20K 以上，3 年以内，双休优先，不要实习不要校招。"
+python cli.py agent-runs --limit 5
+python cli.py agent-ask "为什么结果这么少"
+```
 
-现有工具的共同问题是**功能割裂** — 投递工具不会做简历，简历工具不会做面试准备。CareerPilot 的核心差异化：
+前端验证：
 
-1. **完整闭环**：岗位采集 → 公司画像 → 简历定制 → 面试资料 → 投递指南，一条龙
-2. **中国市场深度支持**：Boss直聘/牛客/猎聘/智联 + 小红书面经，而非只支持LinkedIn
-3. **面试资料与岗位绑定**：不是通用八股文，而是"针对这个岗位的这些技能"的定向资料
-4. **Resume as Code**：YAML维护一份数据，AI生成N份定制简历
-5. **OpenClaw原生**：直接养在小龙虾里，持续更新
-6. **MiniMax包月友好**：利用M2.7包月额度，成本极低（每周处理3000-5600个岗位）
+```powershell
+streamlit run app.py
+```
 
----
+需要人工检查：
 
-## 九、武汉 AI/Agent 实习岗位清单（已收录）
+- 前端默认城市是否为上海。
+- 默认岗位类型是否为社招。
+- 默认平台是否为智联、51job、猎聘、牛客。
+- 搜索前后页面结果是否对应当前条件。
+- 报告是否展示平台抓取量、筛选量、最终量和字段完整度。
+- 本地私密文件是否没有进入 Git。
 
-| 公司 | 岗位 | 地点 | 薪资 | 类型 | 投递 |
-|------|------|------|------|------|------|
-| 金山软件 | 应用算法实习生（LLM/Agent/RAG方向） | 武汉/北京 | 实习补贴+免费公寓 | 暑期实习 | https://campus.wps.cn/ |
-| 腾讯青云计划 | 大模型/智能体方向实习 | 武汉/深圳/北京 | 腾讯实习标准 | 暑期实习 | https://join.qq.com/ |
-| 智赋未来(武汉) | AI人工智能研发工程师实习生 | 武汉武昌区 | 150-200元/天 | 日常实习 | 智联招聘 |
-| 光谷集团 | AI应用工程师 | 武汉光谷 | 15-25K/月 | 社招 | 猎聘 |
-| 猎聘-武汉AI公司 | AI Agent 开发工程师实习 | 武汉光谷 | 200-300元/天 | 日常实习 | https://www.liepin.com/ |
-| 字节跳动Seed | 大模型研究实习生 | 北京/杭州 | 400-600元/天 | 暑期实习 | https://jobs.bytedance.com/ |
-| 淘天集团 | AI Agent应用开发工程师-2026暑期实习 | 杭州 | 300-600元/天 | 暑期实习 | https://www.nowcoder.com/jobs/detail/436118 |
-| 天猫技术 | AI Agent算法工程师（大模型方向） | 杭州 | 300-400元/天 | 暑期实习 | https://www.nowcoder.com/jobs/detail/435213 |
-| 阿里云 | AI Agent 开发工程师 | 杭州 | 500-510元/天 | 暑期实习 | https://www.nowcoder.com/jobs/detail/434896 |
-| 中交第二公路院 | 大模型算法工程师（LLM/RAG/Agent） | 武汉蔡甸区 | 30-45K/月 | 社招(全职) | 智联招聘 |
+## 9. 文档维护规则
 
----
+以后每次新增能力，都同步更新：
 
-## 十、Demo 输出文件清单（金山软件实例）
+- `README.md`：面向使用者，说明能做什么、怎么启动、怎么配置。
+- `PLAN.md`：面向开发者，说明当前状态、路线图和风险。
+- `docs/PRODUCT_DESIGN.md`：面向产品设计，说明交互、模块和验收标准。
+- `docs/PHASE1_AGENT_SCAFFOLD.md`：保留 Agent 骨架阶段的实现记录。
+- `skill/SKILL.md`：面向 Skill 使用者，说明当前命令和限制。
 
-已生成文件位于 `data/outputs/`：
+文档禁止再出现以下过期默认口径：
 
-| 文件 | 大小 | 内容 |
-|------|------|------|
-| `resume_金山软件_*_20260404.pdf` | 145KB | LaTeX编译的定制简历 |
-| `resume_金山软件_*_20260404.tex` | 7KB | LaTeX源文件 |
-| `interview_*_eight_part.md` | 23KB | 针对岗位技能的八股文速查 |
-| `interview_*_mock_interview.md` | 17KB | 15题模拟面试（项目拷打+技术+算法+行为） |
-| `interview_*_study_path.md` | 23KB | 4周从零到面试的学习计划 |
-| `interview_*_skill_tree.json` | 1.5KB | 结构化技能要求（必需/加分/基础） |
+- 非 DeepSeek 模型作为默认模型。
+- 非上海社招作为默认目标场景。
+- 把自动批量投递写成 MVP 能力。
+- 把旧 Skill 框架写成当前发布目标。
+- 默认自动打开 Boss 登录浏览器。

@@ -49,7 +49,7 @@ pip install -r requirements.txt
 ```yaml
 llm:
   provider: deepseek
-  model: deepseek-v4
+  model: deepseek-v4-flash
   base_url: https://api.deepseek.com
   api_key: ${DEEPSEEK_API_KEY}
 ```
