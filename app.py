@@ -86,28 +86,126 @@ def jobs_to_frame(jobs: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+UNKNOWN_MARKERS = {
+    "",
+    "-",
+    "未知",
+    "暂无",
+    "无",
+    "未提供",
+    "列表页未提供",
+    "不确定",
+    "unknown",
+    "none",
+    "null",
+    "nan",
+}
+
+INSURANCE_TOKENS = (
+    "五险一金",
+    "五险",
+    "六险",
+    "七险",
+    "社保",
+    "公积金",
+    "补充医疗",
+    "商业保险",
+)
+
+
+def clean_display_value(value) -> str:
+    text = str(value or "").strip()
+    if text.lower() in UNKNOWN_MARKERS:
+        return ""
+    return text
+
+
+def has_display_value(value) -> bool:
+    return bool(clean_display_value(value))
+
+
+def extract_insurance_text(welfare: str) -> str:
+    welfare_text = clean_display_value(welfare)
+    if not welfare_text:
+        return ""
+    if "五险一金" in welfare_text:
+        return "五险一金"
+    found = [token for token in INSURANCE_TOKENS if token in welfare_text]
+    return "、".join(dict.fromkeys(found))
+
+
+def extract_weekend_text(job: dict) -> str:
+    weekend = clean_display_value(job.get("weekend_display") or job.get("weekend_policy", ""))
+    welfare = clean_display_value(job.get("welfare", ""))
+    if weekend:
+        return weekend
+    if any(token in welfare for token in ("周末双休", "双休", "五天工作制", "周末休息")):
+        return "双休"
+    if any(token in welfare for token in ("单休", "单双休", "大小周")):
+        return "非双休/不确定"
+    return ""
+
+
+def should_show_optional_column(jobs: list[dict], extractor) -> bool:
+    return any(has_display_value(extractor(job)) for job in jobs)
+
+
+def visible_job_columns(jobs: list[dict], *, show_recommendation: bool) -> dict[str, bool]:
+    return {
+        "recommendation": show_recommendation,
+        "address": should_show_optional_column(jobs, lambda job: job.get("company_address")),
+        "weekend": should_show_optional_column(jobs, extract_weekend_text),
+        "insurance": should_show_optional_column(jobs, lambda job: extract_insurance_text(job.get("welfare", ""))),
+        "welfare": should_show_optional_column(jobs, lambda job: job.get("welfare")),
+    }
+
+
+def job_table_column_config(show_recommendation: bool) -> dict:
+    config = {
+        "公司": st.column_config.TextColumn("公司", width="medium"),
+        "岗位": st.column_config.TextColumn("岗位", width="large"),
+        "薪资": st.column_config.TextColumn("薪资", width="small"),
+        "经验": st.column_config.TextColumn("经验", width="small"),
+        "学历": st.column_config.TextColumn("学历", width="small"),
+        "地点": st.column_config.TextColumn("地点", width="small"),
+        "来源": st.column_config.TextColumn("来源", width="small"),
+        "链接": st.column_config.LinkColumn("链接", width="small", display_text="打开"),
+    }
+    if show_recommendation:
+        config.update({
+            "推荐等级": st.column_config.TextColumn("推荐等级", width="small"),
+            "推荐分": st.column_config.NumberColumn("推荐分", width="small"),
+            "推荐理由": st.column_config.TextColumn("推荐理由", width="large"),
+            "风险": st.column_config.TextColumn("风险", width="medium"),
+        })
+    return config
+
+
 def search_jobs_to_frame(jobs: list[dict], *, show_recommendation: bool = True) -> pd.DataFrame:
+    visible = visible_job_columns(jobs, show_recommendation=show_recommendation)
     rows = []
     for job in jobs:
         decision = job.get("job_decision", {})
+        welfare = clean_display_value(job.get("welfare", ""))
+        weekend = extract_weekend_text(job)
         row = {
-            "公司": job.get("company", ""),
-            "岗位": job.get("title", ""),
-            "地点": job.get("location", ""),
-            "公司地址": job.get("company_address", ""),
-            "薪资": job.get("salary", ""),
-            "月薪范围K": _salary_range_text(job),
-            "经验": job.get("experience_display") or job.get("experience", ""),
-            "学历": job.get("degree_display") or job.get("degree", ""),
-            "双休": job.get("weekend_display") or job.get("weekend_policy", ""),
-            "福利": job.get("welfare", ""),
-            "类型": job.get("normalized_job_type") or job.get("job_type", ""),
-            "抓取": job.get("crawl_status", ""),
-            "详情": job.get("detail_status", ""),
-            "关键词": job.get("crawl_keyword", ""),
-            "来源": job.get("platform", ""),
-            "链接": job.get("source_url") or job.get("url", ""),
+            "公司": clean_display_value(job.get("company", "")),
+            "岗位": clean_display_value(job.get("title", "")),
+            "薪资": clean_display_value(job.get("salary", "")) or _salary_range_text(job),
+            "经验": clean_display_value(job.get("experience_display") or job.get("experience", "")),
+            "学历": clean_display_value(job.get("degree_display") or job.get("degree", "")),
+            "地点": clean_display_value(job.get("location", "")),
+            "来源": clean_display_value(job.get("platform", "")),
+            "链接": clean_display_value(job.get("source_url") or job.get("url", "")),
         }
+        if visible["address"]:
+            row["公司地址"] = clean_display_value(job.get("company_address", ""))
+        if visible["weekend"]:
+            row["双休情况"] = weekend
+        if visible["insurance"]:
+            row["五险一金"] = extract_insurance_text(welfare)
+        if visible["welfare"]:
+            row["福利情况"] = welfare
         if show_recommendation:
             row = {
                 "推荐等级": decision.get("level", ""),
@@ -121,6 +219,7 @@ def search_jobs_to_frame(jobs: list[dict], *, show_recommendation: bool = True) 
 
 
 def render_job_cards(jobs: list[dict], limit: int = 20, *, show_recommendation: bool = True):
+    visible = visible_job_columns(jobs, show_recommendation=show_recommendation)
     for index, job in enumerate(jobs[:limit], 1):
         decision = job.get("job_decision", {})
         level = decision.get("level", "未评估")
@@ -130,11 +229,12 @@ def render_job_cards(jobs: list[dict], limit: int = 20, *, show_recommendation: 
         platform = job.get("platform", "")
         salary = job.get("salary", "")
         location = job.get("location", "")
-        address = job.get("company_address", "")
-        experience = job.get("experience_display") or job.get("experience", "")
-        degree = job.get("degree_display") or job.get("degree", "")
-        weekend = job.get("weekend_display") or job.get("weekend_policy", "")
-        welfare = job.get("welfare", "")
+        address = clean_display_value(job.get("company_address", ""))
+        experience = clean_display_value(job.get("experience_display") or job.get("experience", ""))
+        degree = clean_display_value(job.get("degree_display") or job.get("degree", ""))
+        weekend = extract_weekend_text(job)
+        welfare = clean_display_value(job.get("welfare", ""))
+        insurance = extract_insurance_text(welfare)
         reasons = decision.get("matched_reasons", [])[:3]
         risks = decision.get("risks", [])[:3]
         resume_actions = decision.get("resume_actions", [])[:2]
@@ -144,20 +244,28 @@ def render_job_cards(jobs: list[dict], limit: int = 20, *, show_recommendation: 
             top_cols = st.columns([4, 1, 1]) if show_recommendation else st.columns([1])
             with top_cols[0]:
                 st.markdown(f"**{index}. {company} - {title}**")
-                st.caption(f"{platform} / {location} / {address or '地址未知'}")
+                meta = [item for item in (platform, location, address if visible["address"] else "") if item]
+                st.caption(" / ".join(meta))
             if show_recommendation:
                 with top_cols[1]:
                     st.metric("推荐", level)
                 with top_cols[2]:
                     st.metric("分数", score)
 
-            info_cols = st.columns(4)
-            info_cols[0].write(f"薪资：{salary or '未知'}")
-            info_cols[1].write(f"经验：{experience or '未知'}")
-            info_cols[2].write(f"学历：{degree or '未知'}")
-            info_cols[3].write(f"双休：{weekend or '未知'}")
+            info_items = [
+                ("薪资", salary),
+                ("经验", experience),
+                ("学历", degree),
+            ]
+            if visible["weekend"] and weekend:
+                info_items.append(("双休", weekend))
+            if visible["insurance"] and insurance:
+                info_items.append(("五险一金", insurance))
+            info_cols = st.columns(min(4, max(1, len(info_items))))
+            for idx, (label, value) in enumerate(info_items):
+                info_cols[idx % len(info_cols)].write(f"{label}：{value or '未知'}")
 
-            if welfare:
+            if visible["welfare"] and welfare:
                 st.caption(f"福利：{welfare}")
             if show_recommendation and reasons:
                 st.markdown("推荐理由：" + "；".join(reasons))
@@ -502,7 +610,7 @@ def main():
     resume_text = ""
     criteria = {"job_types": ["社招"]}
 
-    left_col, center_col, right_col = st.columns([1.05, 2.1, 1.25], gap="large")
+    left_col, center_col, right_col = st.columns([0.95, 2.7, 1.05], gap="large")
 
     with left_col:
         with st.container(border=True):
@@ -797,7 +905,10 @@ def main():
                 st.dataframe(
                     search_jobs_to_frame(jobs[:int(card_limit)], show_recommendation=has_resume),
                     width="stretch",
+                    height=560,
                     hide_index=True,
+                    row_height=42,
+                    column_config=job_table_column_config(has_resume),
                 )
         else:
             st.warning("当前条件下没有岗位结果。可以放宽平台、页数、薪资、经验、学历或双休筛选后重新采集。")
