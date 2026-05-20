@@ -249,7 +249,7 @@ def inject_design_system():
         }
         .block-container {
             max-width: 1520px;
-            padding-top: 1.3rem;
+            padding-top: 4.2rem;
             padding-bottom: 2.2rem;
         }
         h1, h2, h3 {
@@ -288,9 +288,11 @@ def inject_design_system():
             align-items: flex-start;
             justify-content: space-between;
             gap: 1rem;
-            padding: 0.25rem 0 1rem 0;
+            padding: 0.4rem 0 1rem 0;
             border-bottom: 1px solid var(--cp-border);
             margin-bottom: 1rem;
+            position: relative;
+            z-index: 0;
         }
         .cp-title {
             font-size: 1.65rem;
