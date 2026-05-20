@@ -86,13 +86,11 @@ def jobs_to_frame(jobs: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def search_jobs_to_frame(jobs: list[dict]) -> pd.DataFrame:
+def search_jobs_to_frame(jobs: list[dict], *, show_recommendation: bool = True) -> pd.DataFrame:
     rows = []
     for job in jobs:
         decision = job.get("job_decision", {})
-        rows.append({
-            "推荐等级": decision.get("level", ""),
-            "推荐分": decision.get("score", ""),
+        row = {
             "公司": job.get("company", ""),
             "岗位": job.get("title", ""),
             "地点": job.get("location", ""),
@@ -108,14 +106,21 @@ def search_jobs_to_frame(jobs: list[dict]) -> pd.DataFrame:
             "详情": job.get("detail_status", ""),
             "关键词": job.get("crawl_keyword", ""),
             "来源": job.get("platform", ""),
-            "推荐理由": "；".join(decision.get("matched_reasons", [])[:3]),
-            "风险": "；".join(decision.get("risks", [])[:3]),
             "链接": job.get("source_url") or job.get("url", ""),
-        })
+        }
+        if show_recommendation:
+            row = {
+                "推荐等级": decision.get("level", ""),
+                "推荐分": decision.get("score", ""),
+                **row,
+                "推荐理由": "；".join(decision.get("matched_reasons", [])[:3]),
+                "风险": "；".join(decision.get("risks", [])[:3]),
+            }
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
-def render_job_cards(jobs: list[dict], limit: int = 20):
+def render_job_cards(jobs: list[dict], limit: int = 20, *, show_recommendation: bool = True):
     for index, job in enumerate(jobs[:limit], 1):
         decision = job.get("job_decision", {})
         level = decision.get("level", "未评估")
@@ -136,14 +141,15 @@ def render_job_cards(jobs: list[dict], limit: int = 20):
         url = job.get("source_url") or job.get("url", "")
 
         with st.container(border=True):
-            top_cols = st.columns([4, 1, 1])
+            top_cols = st.columns([4, 1, 1]) if show_recommendation else st.columns([1])
             with top_cols[0]:
                 st.markdown(f"**{index}. {company} - {title}**")
                 st.caption(f"{platform} / {location} / {address or '地址未知'}")
-            with top_cols[1]:
-                st.metric("推荐", level)
-            with top_cols[2]:
-                st.metric("分数", score)
+            if show_recommendation:
+                with top_cols[1]:
+                    st.metric("推荐", level)
+                with top_cols[2]:
+                    st.metric("分数", score)
 
             info_cols = st.columns(4)
             info_cols[0].write(f"薪资：{salary or '未知'}")
@@ -153,11 +159,11 @@ def render_job_cards(jobs: list[dict], limit: int = 20):
 
             if welfare:
                 st.caption(f"福利：{welfare}")
-            if reasons:
+            if show_recommendation and reasons:
                 st.markdown("推荐理由：" + "；".join(reasons))
-            if risks:
+            if show_recommendation and risks:
                 st.warning("风险：" + "；".join(risks))
-            if resume_actions:
+            if show_recommendation and resume_actions:
                 st.info("简历动作：" + "；".join(resume_actions))
             if url:
                 st.link_button("打开岗位来源", url)
@@ -741,7 +747,14 @@ def main():
                 unsafe_allow_html=True,
             )
 
-        if jobs and any(job.get("job_decision") for job in jobs):
+        has_resume = bool(resume_text.strip())
+        if jobs and not has_resume:
+            st.markdown(
+                '<div class="cp-alert info">上传简历后，可以查看每个岗位的推荐等级和推荐分，并获得更具体的简历优化与面试建议。</div>',
+                unsafe_allow_html=True,
+            )
+
+        if has_resume and jobs and any(job.get("job_decision") for job in jobs):
             level_counts = count_decision_levels(jobs)
             st.caption(
                 "推荐分布："
@@ -777,9 +790,13 @@ def main():
                     key="result_limit",
                 )
             if result_view == "卡片":
-                render_job_cards(jobs, limit=int(card_limit))
+                render_job_cards(jobs, limit=int(card_limit), show_recommendation=has_resume)
             else:
-                st.dataframe(search_jobs_to_frame(jobs[:int(card_limit)]), width="stretch", hide_index=True)
+                st.dataframe(
+                    search_jobs_to_frame(jobs[:int(card_limit)], show_recommendation=has_resume),
+                    width="stretch",
+                    hide_index=True,
+                )
         else:
             st.warning("当前条件下没有岗位结果。可以放宽平台、页数、薪资、经验、学历或双休筛选后重新采集。")
 
