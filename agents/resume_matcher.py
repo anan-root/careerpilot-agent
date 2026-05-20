@@ -171,7 +171,80 @@ def generate_resume_job_advice(resume_text: str, job: dict) -> str:
 ## 面试准备重点
 ## 面试官可能追问
 ## 投递前检查清单"""
-    return chat(prompt, system="你是专业但诚实的求职顾问，严格反对简历编造。", max_tokens=6000)
+    try:
+        return chat(prompt, system="你是专业但诚实的求职顾问，严格反对简历编造。", max_tokens=6000)
+    except Exception as exc:
+        return build_fallback_resume_job_advice(resume_text, job, error=exc)
+
+
+def build_fallback_resume_job_advice(resume_text: str, job: dict, error: Exception | None = None) -> str:
+    """Generate deterministic advice when the LLM is unavailable."""
+    resume_keywords = set(_extract_keywords(resume_text))
+    job_text = _job_text(job)
+    job_keywords = set(_extract_keywords(job_text))
+    matched = sorted(resume_keywords & job_keywords, key=lambda item: (-len(item), item))[:12]
+    missing = sorted(job_keywords - resume_keywords, key=lambda item: (-len(item), item))[:12]
+    title = job.get("title", "")
+    company = job.get("company", "")
+    salary = job.get("salary", "")
+    location = job.get("location", "")
+    safe_error = error.__class__.__name__ if error else "LLMUnavailable"
+
+    lines = [
+        "# 简历优化意见和面试建议",
+        "",
+        "> DeepSeek 精评暂不可用，已自动切换为本地规则建议。请检查 API Key 或网络后可重新生成精评。",
+        f"> 降级原因：{safe_error}",
+        "",
+        "## 匹配结论",
+        "",
+        f"- 目标岗位：{company} - {title}",
+        f"- 地点/薪资：{location or '未知'} / {salary or '未知'}",
+        f"- 简历已覆盖关键词：{', '.join(matched) or '暂未发现明显重合关键词'}",
+        f"- 建议补强关键词：{', '.join(missing[:8]) or '暂无明显缺口'}",
+        "",
+        "## 简历优化建议",
+        "",
+        "- 把最相关项目放到简历前半部分，标题里直接出现岗位方向关键词。",
+        "- 每条项目描述采用“场景-动作-结果”结构，优先写你真实做过的技术决策和产出。",
+        "- 对岗位要求中已掌握的关键词，补充对应项目证据；没有做过的内容不要硬写。",
+        "- 如果岗位偏 Agent/RAG，把检索、工具调用、上下文构建、服务封装、评估指标写清楚。",
+        "",
+        "## 可直接改写的简历要点",
+        "",
+    ]
+    if matched:
+        for keyword in matched[:5]:
+            lines.append(f"- 围绕 `{keyword}` 补一条真实项目证据，例如你的职责、技术实现和结果。")
+    else:
+        lines.append("- 先补充 1 个与岗位方向最接近的项目证据，再投递该岗位。")
+
+    lines.extend([
+        "",
+        "## 面试准备重点",
+        "",
+    ])
+    focus_terms = [term for term in ("RAG", "Agent", "大模型", "LLM", "Prompt", "向量检索", "FastAPI", "React", "Python") if term.lower() in job_text.lower()]
+    for term in focus_terms[:8] or ["项目架构", "技术选型", "问题定位", "结果量化"]:
+        lines.append(f"- 准备 `{term}` 的项目实践、原理解释和常见追问。")
+
+    lines.extend([
+        "",
+        "## 面试官可能追问",
+        "",
+        "- 这个项目为什么这样设计？你负责了哪一部分？",
+        "- 遇到过什么线上或真实使用问题？你怎么定位和解决？",
+        "- 如果数据量、并发量或准确率要求提升，你会怎么改？",
+        "- 你简历中和岗位最相关的一段经历，能否用 2 分钟讲清楚？",
+        "",
+        "## 投递前检查清单",
+        "",
+        "- 简历里没有编造项目、学历、公司和结果。",
+        "- 岗位关键词至少能在一个真实项目里找到证据。",
+        "- 准备好 30 秒自我介绍和 2 分钟项目介绍。",
+        "- 打开原岗位页面确认工作制、薪资、地点和公司真实性。",
+    ])
+    return "\n".join(lines)
 
 
 def build_match_report(ranked_jobs: list[dict]) -> str:
