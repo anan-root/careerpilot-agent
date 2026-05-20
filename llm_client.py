@@ -9,12 +9,35 @@ from pathlib import Path
 
 _CONFIG_LOCAL = Path(__file__).parent / "config.local.yaml"
 _CONFIG_PATH = Path(__file__).parent / "config.yaml"
+DEFAULT_LLM_CONFIG = {
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash",
+    "base_url": "https://api.deepseek.com",
+    "api_key": "${DEEPSEEK_API_KEY}",
+    "max_tokens": 4096,
+    "temperature": 0.7,
+}
 
 
 def _load_config() -> dict:
     path = _CONFIG_LOCAL if _CONFIG_LOCAL.exists() else _CONFIG_PATH
+    if not path.exists():
+        return {"llm": dict(DEFAULT_LLM_CONFIG)}
     with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f) or {}
+    llm = dict(DEFAULT_LLM_CONFIG)
+    llm.update(cfg.get("llm") or {})
+    cfg["llm"] = llm
+    return cfg
+
+
+def get_config_source() -> str:
+    """Return which config file is active."""
+    if _CONFIG_LOCAL.exists():
+        return str(_CONFIG_LOCAL)
+    if _CONFIG_PATH.exists():
+        return str(_CONFIG_PATH)
+    return "built-in DeepSeek defaults"
 
 
 def _resolve_secret(value: str) -> str:
@@ -42,9 +65,34 @@ def get_client() -> OpenAI:
 def get_llm_config() -> dict:
     """Return non-secret LLM config for UI/status display."""
     cfg = dict(_load_config().get("llm", {}))
-    if cfg.get("api_key"):
-        cfg["api_key"] = "***"
+    raw_key = _resolve_secret(cfg.get("api_key", ""))
+    cfg["config_source"] = get_config_source()
+    cfg["api_key_configured"] = bool(raw_key and not raw_key.startswith("YOUR_"))
+    cfg["api_key"] = _mask_key(raw_key) if raw_key else ""
     return cfg
+
+
+def test_llm_connection() -> dict:
+    """Make a tiny DeepSeek call and return a safe status payload."""
+    cfg = get_llm_config()
+    try:
+        text = chat("请只回复 OK。", system="你是连通性测试助手。", max_tokens=8, temperature=0)
+        return {
+            "ok": True,
+            "provider": cfg.get("provider"),
+            "model": cfg.get("model"),
+            "base_url": cfg.get("base_url"),
+            "message": text.strip(),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "provider": cfg.get("provider"),
+            "model": cfg.get("model"),
+            "base_url": cfg.get("base_url"),
+            "error_type": exc.__class__.__name__,
+            "error": str(exc),
+        }
 
 
 def chat(
@@ -107,3 +155,12 @@ def _extract_json(text: str) -> str:
     if brace_start != -1 and brace_end != -1:
         text = text[brace_start : brace_end + 1]
     return text.strip()
+
+
+def _mask_key(value: str) -> str:
+    value = str(value or "")
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "***"
+    return f"{value[:3]}***{value[-4:]}"
