@@ -21,6 +21,18 @@ def cli():
     pass
 
 
+@cli.command("llm-status")
+@click.option("--test", "run_test", is_flag=True, help="实际请求一次 DeepSeek，验证 API Key 是否可用")
+def llm_status(run_test):
+    """查看当前大模型配置"""
+    import json
+    from llm_client import get_llm_config, test_llm_connection
+
+    console.print(json.dumps(get_llm_config(), ensure_ascii=False, indent=2))
+    if run_test:
+        console.print(json.dumps(test_llm_connection(), ensure_ascii=False, indent=2))
+
+
 @cli.command()
 @click.option("--keyword", "-k", default="AI Agent", help="搜索关键词")
 @click.option("--location", "-l", default="上海", help="目标城市")
