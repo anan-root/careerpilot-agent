@@ -1,18 +1,19 @@
 """Job aggregator -- collects from all platforms, deduplicates, and stores.
 
 Boss直聘 fallback chain:
-  1. boss-cli (kabi-boss-cli, pure HTTP reverse-engineered API)
-  2. Cookie-based API (manual cookie from browser DevTools)
-  3. Curated data (hardcoded fallback, always works offline)
+  - boss: boss-cli -> cookie -> curated
+  - boss_drission: explicit interactive browser login path
 
 DrissionPage can open a real browser and Boss login screen, so it is only used
-when allow_browser_login=True is passed explicitly.
+when the explicit boss_drission platform is selected and allowed.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+import random
+import time
 from collections import Counter
 from typing import Literal
 
@@ -72,6 +73,7 @@ def collect_all_jobs(
         platforms = list(DEFAULT_PLATFORMS)
     else:
         platforms = normalize_platforms(platforms)
+    platforms = _normalize_boss_browser_platforms(platforms, allow_browser_login=allow_browser_login)
 
     all_jobs: list[dict] = []
     keywords = (
@@ -83,34 +85,51 @@ def collect_all_jobs(
     platform_merged_counts: Counter[str] = Counter()
     keyword_fetch_counts: dict[str, int] = {}
 
-    for platform in platforms:
+    for platform_index, platform in enumerate(platforms):
         platform_jobs: list[dict] = []
-        for search_keyword in keywords:
-            try:
-                jobs = _fetch_platform(
-                    platform,
-                    search_keyword,
-                    location,
-                    max_pages,
-                    use_browser_crawlers=use_browser_crawlers,
-                    allow_browser_login=allow_browser_login,
-                )
-                for job in jobs:
-                    job.setdefault("crawl_keyword", search_keyword)
-                    job.setdefault("crawl_status", _default_crawl_status(platform, use_browser_crawlers))
-                logger.info("[%s] keyword='%s' fetched %d jobs", platform, search_keyword, len(jobs))
-                keyword_fetch_counts[f"{platform}:{search_keyword}"] = len(jobs)
-                platform_fetch_counts[str(platform)] += len(jobs)
-                platform_jobs.extend(jobs)
-            except Exception as e:
-                logger.error("[%s] keyword='%s' failed: %s", platform, search_keyword, e)
-                keyword_fetch_counts[f"{platform}:{search_keyword}"] = 0
+        if platform in {"boss", "boss_drission"} and allow_browser_login:
+            platform_jobs = _fetch_boss_browser_keywords(
+                platform,
+                keywords,
+                location,
+                max_pages,
+                use_browser_crawlers=use_browser_crawlers,
+                keyword_fetch_counts=keyword_fetch_counts,
+                platform_fetch_counts=platform_fetch_counts,
+            )
+        else:
+            for keyword_index, search_keyword in enumerate(keywords):
+                try:
+                    jobs = _fetch_platform(
+                        platform,
+                        search_keyword,
+                        location,
+                        max_pages,
+                        use_browser_crawlers=use_browser_crawlers,
+                        allow_browser_login=allow_browser_login,
+                    )
+                    for job in jobs:
+                        job.setdefault("crawl_keyword", search_keyword)
+                        job.setdefault("crawl_status", _default_crawl_status(platform, use_browser_crawlers))
+                    logger.info("[%s] keyword='%s' fetched %d jobs", platform, search_keyword, len(jobs))
+                    keyword_fetch_counts[f"{platform}:{search_keyword}"] = len(jobs)
+                    platform_fetch_counts[str(platform)] += len(jobs)
+                    platform_jobs.extend(jobs)
+                except Exception as e:
+                    logger.error("[%s] keyword='%s' failed: %s", platform, search_keyword, e)
+                    keyword_fetch_counts[f"{platform}:{search_keyword}"] = 0
+
+                if keyword_index < len(keywords) - 1:
+                    time.sleep(random.uniform(1.8, 3.8))
 
         if platform_jobs:
             platform_jobs = _deduplicate(platform_jobs)
         platform_merged_counts[str(platform)] = len(platform_jobs)
         logger.info("[%s] merged %d jobs from %d keywords", platform, len(platform_jobs), len(keywords))
         all_jobs.extend(platform_jobs)
+
+        if platform_index < len(platforms) - 1:
+            time.sleep(random.uniform(2.5, 5.0))
 
     criteria = dict(criteria or {})
     if job_types is not None:
@@ -200,6 +219,73 @@ def _normalize_keywords(keywords: list[str]) -> list[str]:
     return unique or ["AI Agent"]
 
 
+def _normalize_boss_browser_platforms(platforms: list[str], *, allow_browser_login: bool) -> list[str]:
+    """Avoid launching both Boss fallback and Boss browser in the same search."""
+    if not allow_browser_login:
+        return platforms
+
+    result: list[str] = []
+    boss_seen = False
+    for platform in platforms:
+        if platform in {"boss", "boss_drission"}:
+            if not boss_seen:
+                result.append("boss")
+                boss_seen = True
+            continue
+        result.append(platform)
+    return result
+
+
+def _fetch_boss_browser_keywords(
+    platform: str,
+    keywords: list[str],
+    location: str,
+    max_pages: int,
+    *,
+    use_browser_crawlers: bool,
+    keyword_fetch_counts: dict[str, int],
+    platform_fetch_counts: Counter[str],
+) -> list[dict]:
+    """Fetch all Boss keywords in one browser session."""
+    from crawlers.boss_drission import search_boss_drission_batch
+
+    try:
+        results = search_boss_drission_batch(
+            keywords,
+            location,
+            max_pages=max_pages,
+            auto_login=True,
+        )
+    except Exception as e:
+        logger.error("[%s] Boss browser batch failed: %s", platform, e)
+        for search_keyword in keywords:
+            keyword_fetch_counts[f"{platform}:{search_keyword}"] = 0
+        results = {}
+
+    platform_jobs: list[dict] = []
+    for search_keyword in keywords:
+        jobs = results.get(search_keyword, [])
+        if not jobs:
+            try:
+                jobs = _fetch_boss_with_fallback(
+                    search_keyword,
+                    location,
+                    max_pages,
+                    allow_browser_login=False,
+                )
+            except Exception as e:
+                logger.error("[%s] keyword='%s' non-browser fallback failed: %s", platform, search_keyword, e)
+                jobs = []
+        for job in jobs:
+            job.setdefault("crawl_keyword", search_keyword)
+            job.setdefault("crawl_status", _default_crawl_status("boss_drission", use_browser_crawlers))
+        logger.info("[%s] keyword='%s' fetched %d jobs", platform, search_keyword, len(jobs))
+        keyword_fetch_counts[f"{platform}:{search_keyword}"] = len(jobs)
+        platform_fetch_counts[str(platform)] += len(jobs)
+        platform_jobs.extend(jobs)
+    return platform_jobs
+
+
 def _fetch_platform(
     platform: str,
     keyword: str,
@@ -265,38 +351,31 @@ def _fetch_boss_with_fallback(
     *,
     allow_browser_login: bool = False,
 ) -> list[dict]:
-    """Try Boss直聘 crawlers in order: boss-cli → cookie → curated.
+    """Try non-interactive Boss直聘 crawlers in order: boss-cli -> cookie -> curated."""
 
-    DrissionPage is inserted before cookie only when allow_browser_login=True.
-    """
+    if allow_browser_login:
+        try:
+            from crawlers.boss_drission import search_boss_drission
+            jobs = search_boss_drission(keyword, location, max_pages=max_pages, auto_login=True)
+            if jobs:
+                logger.info("Boss: login browser crawler succeeded with %d jobs", len(jobs))
+                return jobs
+            logger.info("Boss: login browser crawler returned empty, falling back to non-interactive sources...")
+        except Exception as e:
+            logger.info("Boss: login browser crawler failed (%s), falling back to non-interactive sources...", e)
 
     # 1. boss-cli
-    next_step = "DrissionPage" if allow_browser_login else "cookie"
     try:
         from crawlers.boss_real import search_boss_real
         jobs = search_boss_real(keyword, location)
         if jobs:
             logger.info("Boss: boss-cli succeeded with %d jobs", len(jobs))
             return jobs
-        logger.info("Boss: boss-cli returned empty, trying %s...", next_step)
+        logger.info("Boss: boss-cli returned empty, trying cookie...")
     except Exception as e:
-        logger.info("Boss: boss-cli failed (%s), trying %s...", e, next_step)
+        logger.info("Boss: boss-cli failed (%s), trying cookie...", e)
 
-    # 2. DrissionPage (only when the caller explicitly allows an interactive login browser)
-    if allow_browser_login:
-        try:
-            from crawlers.boss_drission import search_boss_drission
-            jobs = search_boss_drission(keyword, location, max_pages=max_pages, auto_login=True)
-            if jobs:
-                logger.info("Boss: DrissionPage succeeded with %d jobs", len(jobs))
-                return jobs
-            logger.info("Boss: DrissionPage returned empty, trying cookie...")
-        except Exception as e:
-            logger.info("Boss: DrissionPage failed (%s), trying cookie...", e)
-    else:
-        logger.info("Boss: skipping DrissionPage because allow_browser_login=False")
-
-    # 3. Cookie-based API
+    # 2. Cookie-based API
     try:
         from crawlers.boss_cookie import search_boss_with_cookie
         jobs = search_boss_with_cookie(keyword, location, max_pages=max_pages)
@@ -307,7 +386,7 @@ def _fetch_boss_with_fallback(
     except Exception as e:
         logger.info("Boss: cookie crawler failed (%s), using curated data...", e)
 
-    # 4. Curated fallback
+    # 3. Curated fallback
     from crawlers.boss import search_boss_jobs
     jobs = search_boss_jobs(keyword, location)
     logger.info("Boss: curated fallback returned %d jobs", len(jobs))

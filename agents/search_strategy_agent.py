@@ -11,6 +11,7 @@ DEFAULT_LOCATION = "上海"
 DEFAULT_PLATFORMS = list(DEFAULT_PLATFORM_CODES)
 DEFAULT_DEGREES = ["不限", "大专", "本科", "硕士", "博士"]
 DEFAULT_JOB_TYPES = ["社招"]
+DEFAULT_MAX_PAGES = 2
 
 ROLE_KEYWORDS = [
     ("AI Agent", ("ai agent", "agent", "智能体")),
@@ -27,6 +28,15 @@ CITY_NAMES = [
     "西安", "合肥", "重庆", "天津", "厦门", "长沙", "青岛", "郑州", "大连",
     "宁波", "福州", "昆明", "济南", "沈阳",
 ]
+
+GRADUATE_EXPERIENCE_TOKENS = (
+    "去年毕业", "刚毕业", "毕业一年", "毕业1年", "毕业 1 年", "应届毕业",
+)
+WEEKEND_PREFERENCE_TOKENS = ("双休", "周末双休", "五天工作制")
+WEEKEND_REQUIRED_TOKENS = (
+    "只看双休", "仅看双休", "必须双休", "双休必须", "双休必需",
+    "不要单休", "不看单休", "排除单休", "拒绝单休",
+)
 
 
 def build_search_plan(goal_text: str, resume_profile: dict | None = None) -> dict:
@@ -45,6 +55,8 @@ def build_search_plan(goal_text: str, resume_profile: dict | None = None) -> dic
     max_pages = _extract_max_pages(text)
 
     notes = _build_notes(text, job_types, criteria, platforms)
+    if max_pages == DEFAULT_MAX_PAGES:
+        notes.append(f"默认先抓 {DEFAULT_MAX_PAGES} 页；结果偏少时可以继续加页数。")
 
     return {
         "goal_text": goal_text.strip(),
@@ -58,7 +70,7 @@ def build_search_plan(goal_text: str, resume_profile: dict | None = None) -> dic
         "excluded_terms": excluded_terms,
         "safety": {
             "use_browser_crawlers": False,
-            "allow_browser_login": False,
+            "allow_browser_login": _wants_boss_login(text),
         },
         "notes": notes,
         "_memory_summary": str(memory_context.get("summary") or ""),
@@ -91,7 +103,7 @@ def _expand_keywords(keyword: str, text: str, resume_profile: dict) -> list[str]
     candidates = [keyword]
 
     if any(token in lower for token in ("ai agent", "agent", "智能体")):
-        candidates.extend(["大模型应用", "RAG", "LLM", "AI应用开发", "智能体"])
+        candidates.extend(["智能体", "大模型应用", "RAG", "LLM", "AI应用开发"])
     elif any(token in lower for token in ("大模型", "llm", "aigc")):
         candidates.extend(["LLM", "大模型应用", "RAG", "AI应用开发", "AIGC"])
     elif "rag" in lower or "知识库" in lower:
@@ -105,7 +117,7 @@ def _expand_keywords(keyword: str, text: str, resume_profile: dict) -> list[str]
         candidates.extend(str(skill) for skill in skills[:3])
         candidates.extend(["大模型", "AI应用"])
 
-    return _unique_nonempty(candidates)[:5]
+    return _unique_nonempty(candidates)[:6]
 
 
 def _extract_location(text: str) -> str:
@@ -148,59 +160,91 @@ def _extract_platforms(text: str) -> list[str]:
 
 
 def _extract_criteria(text: str) -> dict:
-    min_salary, max_salary = _extract_salary_range(text)
+    min_salary, max_salary, preferred_max_salary = _extract_salary_range(text)
     criteria = {
         "job_types": _extract_job_types(text),
         "min_salary_k": min_salary,
         "max_salary_k": max_salary,
+        "salary_preferred_max_k": preferred_max_salary,
         "max_experience_years": _extract_max_experience(text),
+        "experience_preferred_max_years": _extract_experience_preference(text),
         "degrees": _extract_degrees(text),
-        "weekend_only": any(token in text for token in ("双休", "周末双休", "五天工作制")),
+        "weekend_preferred": _has_weekend_preference(text),
+        "weekend_only": _requires_weekend(text),
     }
     return criteria
 
 
-def _extract_salary_range(text: str) -> tuple[float | None, float | None]:
+def _extract_salary_range(text: str) -> tuple[float | None, float | None, float | None]:
     match = re.search(r"(\d+(?:\.\d+)?)\s*[kK]\s*(?:以内|以下|内|封顶|以内都可以)", text)
     if match:
-        return None, float(match.group(1))
+        return None, None, float(match.group(1))
 
     match = re.search(r"(\d+(?:\.\d+)?)\s*(?:万|w|W)\s*(?:以内|以下|内|封顶|以内都可以)", text)
     if match:
-        return None, float(match.group(1)) * 10
+        return None, None, float(match.group(1)) * 10
 
     match = re.search(r"(\d+(?:\.\d+)?)\s*[kK]\s*(?:以上|起|起步|及以上|\+)", text)
     if match:
-        return float(match.group(1)), None
+        return float(match.group(1)), None, None
 
     match = re.search(r"(\d+(?:\.\d+)?)\s*(?:万|w|W)\s*(?:以上|起|起步|及以上|\+)", text)
     if match:
-        return float(match.group(1)) * 10, None
+        return float(match.group(1)) * 10, None, None
 
     match = re.search(r"(\d+(?:\.\d+)?)\s*[-~到至]\s*(\d+(?:\.\d+)?)\s*[kK]", text)
     if match:
-        return float(match.group(1)), float(match.group(2))
+        return float(match.group(1)), float(match.group(2)), None
 
     match = re.search(r"(\d+(?:\.\d+)?)\s*[-~到至]\s*(\d+(?:\.\d+)?)\s*(?:万|w|W)", text)
     if match:
-        return float(match.group(1)) * 10, float(match.group(2)) * 10
+        return float(match.group(1)) * 10, float(match.group(2)) * 10, None
 
     match = re.search(r"月薪\s*(\d+(?:\.\d+)?)\s*(?:万|w|W)", text)
     if match:
-        return float(match.group(1)) * 10, None
+        return float(match.group(1)) * 10, None, None
 
-    return None, None
+    return None, None, None
 
 
 def _extract_max_experience(text: str) -> int | None:
     match = re.search(r"(\d+)\s*年\s*(?:以内|以下|内)", text)
     if match:
         return int(match.group(1))
-    if any(token in text for token in ("去年毕业", "刚毕业", "毕业一年", "毕业1年", "毕业 1 年", "应届毕业")):
-        return 1
     if any(token in text for token in ("经验不限", "不限经验", "无需经验")):
         return 0
     return None
+
+
+def _extract_experience_preference(text: str) -> int | None:
+    """Infer a ranking preference from graduate wording without hard-filtering jobs."""
+    if _extract_max_experience(text) is not None:
+        return None
+    if any(token in text for token in GRADUATE_EXPERIENCE_TOKENS):
+        return 1
+    return None
+
+
+def _has_weekend_preference(text: str) -> bool:
+    return any(token in text for token in WEEKEND_PREFERENCE_TOKENS)
+
+
+def _requires_weekend(text: str) -> bool:
+    return any(token in text for token in WEEKEND_REQUIRED_TOKENS)
+
+
+def _wants_boss_login(text: str) -> bool:
+    return any(token in text for token in (
+        "允许boss登录",
+        "允许 boss 登录",
+        "开启boss登录",
+        "开启 boss 登录",
+        "boss登录浏览器",
+        "boss 登录浏览器",
+        "登录浏览器",
+        "打开boss登录",
+        "打开 boss 登录",
+    ))
 
 
 def _extract_degrees(text: str) -> list[str]:
@@ -242,16 +286,22 @@ def _merge_excluded_terms(explicit_terms: list[str], memory_terms: list[str]) ->
 def _extract_max_pages(text: str) -> int:
     match = re.search(r"(\d+)\s*页", text)
     if not match:
-        return 1
+        return DEFAULT_MAX_PAGES
     return max(1, min(int(match.group(1)), 10))
 
 
 def _build_notes(text: str, job_types: list[str], criteria: dict, platforms: list[str]) -> list[str]:
-    notes = ["默认不打开交互式浏览器，也不会自动打开 Boss 登录页。"]
+    notes = ["Boss 登录浏览器默认关闭；需要真实登录浏览器时必须手动授权。"]
     if "boss" in platforms:
-        notes.append("Boss 普通模式只尝试非交互方式；需要真实登录浏览器时必须手动授权。")
+        notes.append("Boss 普通模式不会自动打开登录浏览器；登录态、验证码和平台风控可能影响结果数量。")
+    if criteria.get("salary_preferred_max_k") is not None and criteria.get("max_salary_k") is None:
+        notes.append("薪资上限按偏好处理，不会硬筛选，以免把结果压得太少。")
     if criteria.get("weekend_only"):
-        notes.append("双休字段不是所有平台列表页都会公开，系统会保留双休未知但其他条件匹配的岗位。")
+        notes.append("已按明确的双休硬条件过滤；工作制字段缺失时可能影响结果数量。")
+    elif criteria.get("weekend_preferred"):
+        notes.append("“双休优先”只参与排序和风险提示，不会在展示前直接过滤岗位。")
+    if criteria.get("experience_preferred_max_years") is not None:
+        notes.append("毕业时间推断出的经验偏好只用于排序提示；只有明确写出经验上限才会硬过滤。")
     if job_types == ["社招"]:
         notes.append("已按社招/全职优先过滤，牛客等平台返回的实习岗位会被排除。")
     if any(token in text for token in ("外包", "培训")):

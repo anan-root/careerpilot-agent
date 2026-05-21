@@ -60,10 +60,26 @@ def build_chromium_options(profile_name: str, *, headless: bool = True):
     if hasattr(options, "auto_port"):
         options.auto_port(True)
     options.headless(headless)
+    apply_browser_hardening(options)
+    return options
+
+
+def apply_browser_hardening(options):
+    """Apply browser flags that reduce noisy startup and extension side effects."""
     options.set_argument("--disable-blink-features=AutomationControlled")
-    options.set_argument("--no-sandbox")
+    # Windows Chrome does not support --no-sandbox, so skip it there.
+    if os.name != "nt":
+        options.set_argument("--no-sandbox")
     options.set_argument("--disable-gpu")
     options.set_argument("--disable-dev-shm-usage")
+    options.set_argument("--no-first-run")
+    options.set_argument("--no-default-browser-check")
+    options.set_argument("--disable-extensions")
+    options.set_argument("--disable-component-extensions-with-background-pages")
+    options.set_argument("--disable-popup-blocking")
+    options.set_argument("--disable-background-networking")
+    options.set_argument("--disable-sync")
+    options.set_argument("--disable-notifications")
     return options
 
 

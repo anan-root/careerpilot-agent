@@ -99,10 +99,21 @@ def decide_job(
 
 def _salary_adjustment(job: dict, criteria: dict, risks: list[str]) -> float:
     min_expected = criteria.get("min_salary_k")
+    preferred_max = criteria.get("salary_preferred_max_k")
     salary_min = job.get("salary_min_k")
     salary_max = job.get("salary_max_k")
     if min_expected is None:
-        return 0
+        if preferred_max is None:
+            return 0
+        if salary_max is None:
+            risks.append("薪资可解析范围不足")
+            return -1
+        if salary_min is not None and salary_min > float(preferred_max):
+            risks.append("薪资高于当前偏好")
+            return -8
+        if salary_max is not None and salary_max <= float(preferred_max):
+            return 4
+        return 1
     if salary_max is None:
         risks.append("薪资可解析范围不足")
         return -2
@@ -117,10 +128,14 @@ def _salary_adjustment(job: dict, criteria: dict, risks: list[str]) -> float:
 def _experience_adjustment(job: dict, profile: dict, criteria: dict, risks: list[str]) -> float:
     job_exp = job.get("experience_years_min")
     max_expected = criteria.get("max_experience_years")
+    preferred_max = criteria.get("experience_preferred_max_years")
     user_exp = profile.get("experience_years")
     if max_expected is not None and job_exp is not None and job_exp > int(max_expected):
         risks.append(f"经验要求可能偏高：{job.get('experience_display', job_exp)}")
         return -16
+    if preferred_max is not None and job_exp is not None and job_exp > int(preferred_max):
+        risks.append(f"经验要求高于当前偏好：{job.get('experience_display', job_exp)}")
+        return -10
     if user_exp is not None and job_exp is not None and job_exp > int(user_exp) + 1:
         risks.append("岗位经验门槛可能高于简历经历")
         return -10
@@ -147,16 +162,18 @@ def _degree_adjustment(job: dict, profile: dict, criteria: dict, risks: list[str
 
 
 def _weekend_adjustment(job: dict, criteria: dict, risks: list[str]) -> float:
-    if not criteria.get("weekend_only"):
+    weekend_only = bool(criteria.get("weekend_only"))
+    weekend_preferred = bool(criteria.get("weekend_preferred") or weekend_only)
+    if not weekend_preferred:
         return 0
     policy = job.get("weekend_policy")
     if policy == "双休":
         return 6
     if policy == "未知":
         risks.append("双休信息未公开")
-        return -3
+        return -3 if weekend_only else -1
     risks.append(f"工作制风险：{policy}")
-    return -8
+    return -8 if weekend_only else -4
 
 
 def _excluded_term_adjustment(job: dict, excluded_terms: list[str], risks: list[str]) -> float:

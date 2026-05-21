@@ -21,7 +21,12 @@ from memory.store import (
 from platform_registry import platform_label, platform_label_text
 
 
-def run_agent_search(goal_text: str, resume_text: str | None = None) -> dict:
+def run_agent_search(
+    goal_text: str,
+    resume_text: str | None = None,
+    *,
+    allow_browser_login: bool | None = None,
+) -> dict:
     """Plan and execute a safe job search from a natural-language goal."""
     run = create_agent_run(goal_text, resume_present=bool(resume_text))
     run_id = run["run_id"]
@@ -38,6 +43,10 @@ def run_agent_search(goal_text: str, resume_text: str | None = None) -> dict:
         if resume_profile:
             resume_profile = {**resume_profile, "_memory_context": memory_context}
         plan = build_search_plan(goal_text, resume_profile)
+        if allow_browser_login is not None:
+            plan_safety = dict(plan.get("safety") or {})
+            plan_safety["allow_browser_login"] = bool(allow_browser_login)
+            plan["safety"] = plan_safety
         add_agent_run_step(
             run_id,
             "制定搜索计划",
@@ -125,11 +134,15 @@ def build_agent_message(plan: dict, summary: dict, jobs: list[dict], *, has_resu
     notes = plan.get("notes") or []
     if notes:
         parts.append("注意：" + "；".join(notes))
+    if "boss" in (plan.get("platforms") or []) and not bool((plan.get("safety") or {}).get("allow_browser_login", False)):
+        parts.append("本次 Agent 路径没有启用 Boss 登录浏览器，所以 BOSS 结果可能偏少。")
+    elif "boss" in (plan.get("platforms") or []) and bool((plan.get("safety") or {}).get("allow_browser_login", False)):
+        parts.append("本次 Agent 路径已允许 Boss 登录浏览器；如需登录，系统会优先尝试弹窗登录。")
     if memory_summary:
         parts.append("记忆：" + memory_summary)
 
     if not jobs:
-        parts.append("这次没有符合条件的岗位，优先放宽薪资、经验、双休或关键词数量。")
+        parts.append("这次没有符合条件的岗位，优先放宽薪资或明确写出的硬筛选，再增加页数和关键词。")
     elif has_resume:
         decision_counts = _decision_counts(jobs)
         parts.append(f"我已经基于简历画像和岗位条件做了决策排序：{decision_counts}。下一步可以选择岗位生成简历优化和面试建议。")
@@ -142,9 +155,9 @@ def build_agent_message(plan: dict, summary: dict, jobs: list[dict], *, has_resu
 def build_next_actions(jobs: list[dict], *, has_resume: bool = False) -> list[str]:
     if not jobs:
         return [
-            "放宽筛选条件后重新检索，例如先取消双休优先或放宽薪资范围。",
-            "增加关键词数量，尝试“大模型应用 / RAG / LLM / AI应用开发”。",
-            "如需 Boss 真实数据，手动开启 Boss 登录浏览器授权。",
+            "放宽硬筛选后重新检索，例如先放宽薪资范围或明确写出的经验上限。",
+            "增加关键词数量，尝试“大模型应用 / 智能体 / RAG / LLM / AI应用开发”。",
+            "如需 Boss 真实数据，目标里写“允许 Boss 登录浏览器”，或改用左侧手动搜索并勾选授权。",
         ]
 
     actions = ["打开排名靠前的岗位，查看匹配理由和风险。"]

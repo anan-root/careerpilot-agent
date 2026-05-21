@@ -22,6 +22,8 @@ from rich.table import Table
 from rich.panel import Panel
 console = Console()
 
+from crawlers.browser_utils import apply_browser_hardening
+
 CITY_CODES = {
     "武汉": "101200100", "北京": "101010100", "上海": "101020100",
     "杭州": "101210100", "深圳": "101280600", "广州": "101280100",
@@ -48,8 +50,9 @@ def main():
     from DrissionPage import ChromiumPage, ChromiumOptions
     co = ChromiumOptions()
     co.set_user_data_path(USER_DATA)
-    co.set_argument("--disable-blink-features=AutomationControlled")
-    co.set_argument("--no-sandbox")
+    if hasattr(co, "auto_port"):
+        co.auto_port(True)
+    apply_browser_hardening(co)
 
     page = ChromiumPage(co)
 

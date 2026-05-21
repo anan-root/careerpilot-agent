@@ -34,7 +34,7 @@ def search_zhilian(keyword: str = "AI Agent", city: str = "上海", *, max_pages
             if not jobs:
                 break
             all_jobs.extend(jobs)
-            time.sleep(random.uniform(1.5, 3.0))
+            time.sleep(random.uniform(2.5, 5.0))
         except Exception as exc:
             logger.warning("Zhilian page %d failed: %s", page, exc)
             break

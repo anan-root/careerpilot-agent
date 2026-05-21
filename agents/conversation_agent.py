@@ -117,11 +117,17 @@ def _answer_low_results(context: dict[str, Any]) -> str:
         reasons.append(f"薪资下限设为 {criteria.get('min_salary_k')}K，低于预期的岗位会被过滤或降权。")
     if criteria.get("max_salary_k"):
         reasons.append(f"薪资上限设为 {criteria.get('max_salary_k')}K，高于预期的岗位会被过滤。")
+    elif criteria.get("salary_preferred_max_k") is not None:
+        reasons.append(f"薪资偏好设为 {criteria.get('salary_preferred_max_k')}K 以下，它只影响排序和风险提示，不会硬砍候选。")
     if criteria.get("max_experience_years") is not None:
         reasons.append(f"经验上限设为 {criteria.get('max_experience_years')} 年以内，经验门槛高的岗位会被过滤或标风险。")
+    elif criteria.get("experience_preferred_max_years") is not None:
+        reasons.append(f"毕业时间推断出偏好 {criteria.get('experience_preferred_max_years')} 年以内岗位，但它只影响排序和风险提示，不会单独清空候选。")
     if criteria.get("weekend_only"):
-        reasons.append("双休优先会进一步收窄结果；未知双休会保留，但明确非双休会被压低。")
-    reasons.append("想增加结果量，可以先把页数调到 2-3，或暂时取消双休优先；当前仍建议保留“不要实习”。")
+        reasons.append("当前写成了明确双休硬条件，公开工作制不匹配的岗位会被过滤。")
+    elif criteria.get("weekend_preferred"):
+        reasons.append("“双休优先”只影响排序和风险提示，不会单独清空候选。")
+    reasons.append("想增加结果量，可以先把页数调到 2-3，再放宽薪资或明确写出的硬筛选；当前仍建议保留“不要实习”。")
     return "\n\n".join(reasons)
 
 

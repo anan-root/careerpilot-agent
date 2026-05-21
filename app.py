@@ -68,6 +68,10 @@ def jobs_to_frame(jobs: list[dict]) -> pd.DataFrame:
     return search_jobs_to_frame(jobs, show_recommendation=True)
 
 
+def reset_result_pagination():
+    st.session_state["result_page_v1"] = 1
+
+
 def platform_key(value: object) -> str:
     code = normalize_platform(str(value or "").strip())
     if code in {"boss_drission", "boss_cookie"}:
@@ -565,9 +569,15 @@ def render_job_table(jobs: list[dict], limit: int, *, show_recommendation: bool 
     st.markdown(table_html, unsafe_allow_html=True)
 
 
-def render_job_cards(jobs: list[dict], limit: int = 20, *, show_recommendation: bool = True):
+def render_job_cards(
+    jobs: list[dict],
+    limit: int = 20,
+    *,
+    show_recommendation: bool = True,
+    start_index: int = 1,
+):
     visible = visible_job_columns(jobs, show_recommendation=show_recommendation)
-    for index, job in enumerate(jobs[:limit], 1):
+    for index, job in enumerate(jobs[:limit], start_index):
         decision = job.get("job_decision", {})
         recommendation = recommendation_view(job)
         title = display_job_title(job)
@@ -703,6 +713,7 @@ def run_search(
     )
     st.session_state["search_dirty"] = False
     clear_search_outputs()
+    reset_result_pagination()
     load_jobs.clear()
     return jobs
 
@@ -1304,7 +1315,7 @@ def main():
                 help="例如：帮我找上海 AI Agent 岗位，我是去年毕业的，薪资 20K 以内，社招和校招都可以，双休优先，不要实习。",
             )
             run_agent = st.button("启动 Agent 检索", type="primary", width="stretch")
-            st.caption("Agent 默认不会打开浏览器，也不会打开 Boss 登录页。")
+            st.caption("Boss 登录浏览器默认关闭；需要时请手动开启，并按页面提示完成登录。")
 
         with st.container(border=True):
             st.markdown('<div class="cp-panel-title">02 搜索筛选</div>', unsafe_allow_html=True)
@@ -1317,7 +1328,13 @@ def main():
             with location_col:
                 location = st.text_input("城市", value="上海")
             with page_col:
-                max_pages = st.number_input("页数", min_value=1, max_value=10, value=1)
+                max_pages = st.number_input(
+                    "页数",
+                    min_value=1,
+                    max_value=10,
+                    value=2,
+                    help="默认抓 2 页。结果偏少时可以再往上加。",
+                )
 
             job_types = st.multiselect(
                 "岗位类型",
@@ -1328,26 +1345,34 @@ def main():
             allow_browser_login = st.checkbox(
                 "允许打开 Boss 登录浏览器",
                 value=False,
-                key="allow_boss_browser_login_v2",
-                help="默认关闭。只有勾选后，Boss DrissionPage 才可以打开浏览器并提示扫码登录。",
+                key="allow_boss_browser_login_v3",
+                help="默认关闭。勾选后，已选择的 BOSS直聘会改走同一个登录浏览器窗口。",
             )
+            if allow_browser_login:
+                st.warning(
+                    "已允许 Boss 登录浏览器：本次 BOSS直聘会复用同一个弹窗窗口完成登录和搜索。"
+                    "登录态由平台控制，遇到手机号、验证码或登录失效时需要你手动处理。"
+                )
             platform_options = [
                 code for code in PLATFORM_ORDER
                 if code in PLATFORM_LABELS and code not in {"boss_drission", "boss_cookie"}
             ]
-            if allow_browser_login:
-                platform_options.insert(1, "boss_drission")
+            current_platforms = list(st.session_state.get("platforms_safe_v2", DEFAULT_PLATFORM_CODES))
+            current_platforms = [p for p in current_platforms if p in platform_options]
+            st.session_state["platforms_safe_v2"] = current_platforms
             platforms = st.multiselect(
                 "招聘平台",
                 platform_options,
-                default=list(DEFAULT_PLATFORM_CODES),
+                default=current_platforms,
                 key="platforms_safe_v2",
                 format_func=platform_label,
-                help="默认只选 BOSS直聘、智联招聘、前程无忧。其他平台可手动勾选；不会默认打开登录浏览器。",
+                help="默认只选 BOSS直聘、智联招聘、前程无忧。其他平台可手动勾选；Boss 登录浏览器需要单独授权。",
             )
             if not allow_browser_login and "boss_drission" in platforms:
                 platforms = [p for p in platforms if p != "boss_drission"]
                 st.warning("已忽略 BOSS直聘（登录浏览器）：未勾选“允许打开 Boss 登录浏览器”。")
+            elif allow_browser_login and "boss" in platforms:
+                st.info("本次 BOSS直聘会使用同一个登录浏览器窗口；提交后如需登录会弹出窗口。")
 
             with st.expander("高级采集与过滤", expanded=False):
                 use_browser_crawlers = st.checkbox(
@@ -1357,7 +1382,7 @@ def main():
                     help="默认关闭，避免自动启动 Edge/Chrome。",
                 )
                 expand_keywords = st.checkbox("扩展关键词检索", value=True)
-                max_keywords = st.number_input("最多扩展关键词数", min_value=1, max_value=8, value=4)
+                max_keywords = st.number_input("最多扩展关键词数", min_value=1, max_value=8, value=5)
                 enrich_details = st.checkbox("二次抓取详情页", value=True)
                 detail_limit = st.number_input("详情抓取上限", min_value=0, max_value=100, value=20)
                 min_salary_k, max_salary_k = st.slider("月薪范围（K）", 0, 100, (0, 20))
@@ -1367,7 +1392,7 @@ def main():
                     ["不限", "大专", "本科", "硕士", "博士"],
                     default=["不限", "大专", "本科", "硕士", "博士"],
                 )
-                weekend_only = st.checkbox("优先只看双休/双休不确定", value=False)
+                weekend_only = st.checkbox("只看公开双休/待确认工作制", value=False)
 
             criteria = {
                 "job_types": job_types,
@@ -1444,7 +1469,11 @@ def main():
     if run_agent:
         st.session_state["agent_goal"] = agent_goal
         with st.spinner("Agent 正在制定搜索计划并检索岗位..."):
-            result = run_agent_search(agent_goal, resume_text or None)
+            result = run_agent_search(
+                agent_goal,
+                resume_text or None,
+                allow_browser_login=allow_browser_login,
+            )
         st.session_state["agent_result"] = result
         st.session_state["current_jobs"] = result.get("jobs", [])
         st.session_state["search_summary"] = result.get("summary", {})
@@ -1460,6 +1489,7 @@ def main():
         )
         st.session_state["search_dirty"] = False
         clear_search_outputs()
+        reset_result_pagination()
         if result.get("resume_profile"):
             st.session_state["resume_profile"] = result["resume_profile"]
         load_jobs.clear()
@@ -1501,6 +1531,17 @@ def main():
         metric_cols[2].metric("原始候选", summary.get("search_raw_total", "-") if summary else "-")
         metric_cols[3].metric("最终展示", summary.get("search_final_total", len(jobs)) if summary else len(jobs))
 
+        if summary:
+            selected_platforms = summary.get("selected_platforms") or []
+            platform_fetch_counts = summary.get("search_platform_fetch_counts", {})
+            if "boss" in selected_platforms and int(platform_fetch_counts.get("boss", 0)) == 0:
+                st.warning(
+                    "BOSS 这次没有拿到有效岗位，通常是没有登录态、被安全验证拦截，或者当前关键词/页数太浅。"
+                    "想提升结果，优先把页数调到 2-3 页；确实需要时再手动开启并选择“BOSS直聘（登录浏览器）”。"
+                )
+            if int(summary.get("search_raw_total", 0) or 0) <= 10:
+                st.info("本轮候选偏少，优先把页数提高到 2-3 页，再放宽薪资、明确经验上限或关键词。")
+
         if current_jobs is not None:
             st.caption(
                 f"{st.session_state.get('last_search_label', '')} / "
@@ -1513,17 +1554,28 @@ def main():
                 )
             if summary:
                 with st.expander("搜索质量与字段完整度", expanded=False):
+                    platform_rows = []
+                    selected_platforms = summary.get("selected_platforms") or []
+                    for code in platform_display_order(selected_platforms):
+                        platform_rows.append({
+                            "平台": platform_label(code),
+                            "抓取候选": int((summary.get("search_platform_fetch_counts", {}) or {}).get(code, 0)),
+                            "最终保留": int((summary.get("search_final_platform_counts", {}) or {}).get(code, 0)),
+                        })
+                    if platform_rows:
+                        st.write("平台命中总览")
+                        st.dataframe(pd.DataFrame(platform_rows), hide_index=True, width="stretch")
                     q1, q2 = st.columns(2)
                     with q1:
-                        st.write("平台抓取")
-                        st.dataframe(pd.DataFrame(dict_to_rows(summary.get("search_platform_fetch_counts", {}))), hide_index=True, width="stretch")
-                        st.write("最终平台分布")
-                        st.dataframe(pd.DataFrame(dict_to_rows(summary.get("search_final_platform_counts", {}))), hide_index=True, width="stretch")
-                    with q2:
                         st.write("字段完整度")
                         st.dataframe(pd.DataFrame(dict_to_rows(summary.get("search_field_counts", {}))), hide_index=True, width="stretch")
                         st.write("详情抓取")
                         st.dataframe(pd.DataFrame(dict_to_rows(summary.get("search_detail_counts", {}))), hide_index=True, width="stretch")
+                    with q2:
+                        st.write("原始平台抓取")
+                        st.dataframe(pd.DataFrame(dict_to_rows(summary.get("search_platform_fetch_counts", {}))), hide_index=True, width="stretch")
+                        st.write("最终平台分布")
+                        st.dataframe(pd.DataFrame(dict_to_rows(summary.get("search_final_platform_counts", {}))), hide_index=True, width="stretch")
                     st.caption(f"实际检索关键词：{', '.join(summary.get('search_keywords', []))}")
         else:
             st.markdown(
@@ -1566,19 +1618,47 @@ def main():
                     key="job_result_view",
                 )
             with view_cols[1]:
-                card_limit = st.number_input(
-                    "展示数量",
-                    min_value=1,
-                    max_value=100,
-                    value=min(20, len(jobs)),
-                    key="result_limit",
+                page_size = st.selectbox(
+                    "每页数量",
+                    [10, 20, 30, 50],
+                    index=0,
+                    key="result_page_size_v1",
                 )
+
+            total_pages = max(1, (len(jobs) + int(page_size) - 1) // int(page_size))
+            current_page = int(st.session_state.get("result_page_v1", 1) or 1)
+            current_page = max(1, min(current_page, total_pages))
+            st.session_state["result_page_v1"] = current_page
+
+            page_cols = st.columns([1, 1, 2])
+            with page_cols[0]:
+                page_num = st.number_input(
+                    "页码",
+                    min_value=1,
+                    max_value=total_pages,
+                    value=current_page,
+                    step=1,
+                    key="result_page_v1",
+                )
+            start = (int(page_num) - 1) * int(page_size)
+            end = start + int(page_size)
+            page_jobs = jobs[start:end]
+            with page_cols[1]:
+                st.caption(f"第 {int(page_num)}/{total_pages} 页")
+            with page_cols[2]:
+                st.caption(f"共 {len(jobs)} 个岗位，每页 {int(page_size)} 个")
+
             if result_view == "卡片":
-                render_job_cards(jobs, limit=int(card_limit), show_recommendation=has_resume)
+                render_job_cards(
+                    page_jobs,
+                    limit=len(page_jobs),
+                    show_recommendation=has_resume,
+                    start_index=start + 1,
+                )
             else:
-                render_job_table(jobs, int(card_limit), show_recommendation=has_resume)
+                render_job_table(page_jobs, len(page_jobs), show_recommendation=has_resume)
         else:
-            st.warning("当前条件下没有岗位结果。可以放宽平台、页数、薪资、经验、学历或双休筛选后重新采集。")
+            st.warning("当前条件下没有岗位结果。可以增加平台和页数，或放宽薪资、学历、明确经验上限等硬筛选后重新采集。")
 
         st.markdown('<div class="cp-panel-title">简历匹配与行动</div>', unsafe_allow_html=True)
         if not uploaded:

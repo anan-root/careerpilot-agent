@@ -57,7 +57,7 @@ def _build_plan_section(plan: dict[str, Any], summary: dict[str, Any]) -> list[s
         f"- 薪资要求：{_salary_text(criteria)}",
         f"- 经验要求：{_experience_text(criteria)}",
         f"- 学历范围：{_join(criteria.get('degrees')) or '未限制'}",
-        f"- 双休偏好：{'优先双休/未知保留' if criteria.get('weekend_only') else '未强制'}",
+        f"- 双休偏好：{_weekend_text(criteria)}",
         f"- 排除词：{_join(excluded) or '无'}",
     ]
     notes = plan.get("notes") or []
@@ -144,7 +144,7 @@ def _build_decision_overview_section(jobs: list[dict[str, Any]]) -> list[str]:
     if not jobs:
         lines.extend([
             "- 当前没有岗位进入结果集。",
-            "- 建议先放宽薪资、经验、双休或关键词限制，再重新检索。",
+            "- 建议先放宽薪资或明确写出的硬筛选，再增加页数和关键词重新检索。",
             "",
         ])
         return lines
@@ -221,7 +221,7 @@ def _build_next_actions_section(next_actions: list[str], jobs: list[dict[str, An
     else:
         lines.extend([
             "- 放宽筛选条件重新检索。",
-            "- 增加同义关键词，例如 RAG、大模型应用、LLM 应用开发。",
+            "- 增加同义关键词，例如 智能体、RAG、大模型应用、LLM 应用开发。",
         ])
     lines.append("")
     return lines
@@ -232,10 +232,13 @@ def _build_safety_section(plan: dict[str, Any], summary: dict[str, Any]) -> list
     lines = ["## 安全与限制", ""]
     if safety:
         lines.append(f"- 浏览器采集：{'开启' if safety.get('use_browser_crawlers') else '关闭'}")
-        lines.append(f"- Boss 登录浏览器：{'允许' if safety.get('allow_browser_login') else '禁止'}")
+        if safety.get("allow_browser_login"):
+            lines.append("- Boss 登录浏览器：允许")
+        else:
+            lines.append("- Boss 登录浏览器：禁止；如需 BOSS 真实数据，请在目标里明确写“允许 Boss 登录浏览器”或手动勾选。")
     else:
         lines.append("- 浏览器采集：默认关闭")
-        lines.append("- Boss 登录浏览器：默认禁止")
+        lines.append("- Boss 登录浏览器：默认禁止；如需 BOSS 真实数据，请显式授权。")
     if summary.get("search_detail_counts"):
         lines.append("- 二次抓取只用于补全公开详情页字段，遇到登录/滑块/验证会跳过。")
     lines.append("- 本报告是本地 Agent 的检索与决策记录，最终投递前仍建议打开原岗位页面人工确认。")
@@ -246,20 +249,34 @@ def _build_safety_section(plan: dict[str, Any], summary: dict[str, Any]) -> list
 def _salary_text(criteria: dict[str, Any]) -> str:
     min_salary = criteria.get("min_salary_k")
     max_salary = criteria.get("max_salary_k")
+    preferred_max = criteria.get("salary_preferred_max_k")
     if min_salary and max_salary:
         return f"{min_salary}K-{max_salary}K"
     if min_salary:
         return f"{min_salary}K 以上"
     if max_salary:
         return f"{max_salary}K 以下"
+    if preferred_max is not None:
+        return f"偏好 {preferred_max}K 以下，仅排序提示"
     return "未限制"
 
 
 def _experience_text(criteria: dict[str, Any]) -> str:
     max_years = criteria.get("max_experience_years")
-    if max_years is None:
-        return "未限制"
-    return f"{max_years} 年以内或未知保留"
+    if max_years is not None:
+        return f"{max_years} 年以内或未知保留"
+    preferred_max = criteria.get("experience_preferred_max_years")
+    if preferred_max is not None:
+        return f"偏好 {preferred_max} 年以内，仅排序提示"
+    return "未限制"
+
+
+def _weekend_text(criteria: dict[str, Any]) -> str:
+    if criteria.get("weekend_only"):
+        return "只看公开双休/待确认工作制"
+    if criteria.get("weekend_preferred"):
+        return "优先双休，仅排序提示"
+    return "未限制"
 
 
 def _field_counts_text(field_counts: dict[str, Any]) -> str:
