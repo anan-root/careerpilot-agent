@@ -151,7 +151,10 @@ def agent_ask(question, run_id):
 @click.option("--keyword", "-k", default="AI Agent", help="搜索关键词")
 @click.option("--location", "-l", default="上海", help="目标城市")
 @click.option("--platform", "-p", multiple=True,
-              type=click.Choice(["boss", "boss_drission", "nowcoder", "liepin", "zhilian", "51job", "curated"]),
+              type=click.Choice([
+                  "boss", "boss_drission", "nowcoder", "liepin", "zhilian", "51job",
+                  "lagou", "yingjiesheng", "guopin", "dingxiang", "jobonline", "curated",
+              ]),
               help="指定平台(可多选)")
 @click.option("--pages", default=3, help="每个平台爬取页数")
 @click.option("--job-type", "-t", multiple=True,

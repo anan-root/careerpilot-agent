@@ -21,6 +21,7 @@ from crawlers.aggregator import collect_all_jobs
 from agents.analyst import analyze_jd, score_job, profile_company
 from agents.tailor import generate_tailored_resume, render_latex, generate_greeting
 from agents.coach import generate_interview_pack
+from platform_registry import DEFAULT_PLATFORM_CODES, PLATFORM_LABELS, platform_label_text
 
 console = Console()
 OUTPUT_DIR = Path(__file__).parent / "data" / "outputs"
@@ -32,7 +33,7 @@ def step_collect(keyword: str = "AI Agent", location: str = "上海",
     """Step 1: Collect jobs from all platforms."""
     console.print("\n[bold cyan]═══ Step 1: 岗位采集（多平台真实爬虫） ═══[/]")
 
-    platform_names = ", ".join(platforms) if platforms else "nowcoder + liepin + zhilian + 51job"
+    platform_names = platform_label_text(platforms or DEFAULT_PLATFORM_CODES)
     console.print(f"  平台: {platform_names}")
     if job_types:
         console.print(f"  类型: {', '.join(job_types)}")
@@ -312,7 +313,8 @@ if __name__ == "__main__":
     parser.add_argument("--location", default="上海", help="目标城市")
     parser.add_argument("--top", type=int, default=3, help="处理前N个岗位")
     parser.add_argument("--platform", nargs="*", default=None,
-                        help="指定平台 (boss nowcoder liepin zhilian 51job curated)")
+                        choices=list(PLATFORM_LABELS.keys()),
+                        help="指定平台，默认 BOSS直聘 / 智联招聘 / 前程无忧")
     parser.add_argument("--job-type", nargs="*", default=["社招"],
                         help="岗位类型 (社招 校招 实习)，默认只看社招/全职")
     args = parser.parse_args()

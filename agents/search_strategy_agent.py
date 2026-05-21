@@ -5,8 +5,10 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
+from platform_registry import DEFAULT_PLATFORM_CODES, PLATFORM_ALIASES
+
 DEFAULT_LOCATION = "上海"
-DEFAULT_PLATFORMS = ["zhilian", "51job", "liepin", "nowcoder"]
+DEFAULT_PLATFORMS = list(DEFAULT_PLATFORM_CODES)
 DEFAULT_DEGREES = ["不限", "大专", "本科", "硕士", "博士"]
 DEFAULT_JOB_TYPES = ["社招"]
 
@@ -138,21 +140,8 @@ def _extract_job_types(text: str) -> list[str]:
 
 
 def _extract_platforms(text: str) -> list[str]:
-    mapping = {
-        "智联": "zhilian",
-        "zhaopin": "zhilian",
-        "51job": "51job",
-        "前程无忧": "51job",
-        "猎聘": "liepin",
-        "liepin": "liepin",
-        "牛客": "nowcoder",
-        "nowcoder": "nowcoder",
-        "boss": "boss",
-        "Boss": "boss",
-        "BOSS": "boss",
-    }
     selected = []
-    for token, platform in mapping.items():
+    for token, platform in PLATFORM_ALIASES.items():
         if token in text and platform not in selected:
             selected.append(platform)
     return selected or list(DEFAULT_PLATFORMS)
@@ -172,6 +161,14 @@ def _extract_criteria(text: str) -> dict:
 
 
 def _extract_salary_range(text: str) -> tuple[float | None, float | None]:
+    match = re.search(r"(\d+(?:\.\d+)?)\s*[kK]\s*(?:以内|以下|内|封顶|以内都可以)", text)
+    if match:
+        return None, float(match.group(1))
+
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(?:万|w|W)\s*(?:以内|以下|内|封顶|以内都可以)", text)
+    if match:
+        return None, float(match.group(1)) * 10
+
     match = re.search(r"(\d+(?:\.\d+)?)\s*[kK]\s*(?:以上|起|起步|及以上|\+)", text)
     if match:
         return float(match.group(1)), None
@@ -199,6 +196,8 @@ def _extract_max_experience(text: str) -> int | None:
     match = re.search(r"(\d+)\s*年\s*(?:以内|以下|内)", text)
     if match:
         return int(match.group(1))
+    if any(token in text for token in ("去年毕业", "刚毕业", "毕业一年", "毕业1年", "毕业 1 年", "应届毕业")):
+        return 1
     if any(token in text for token in ("经验不限", "不限经验", "无需经验")):
         return 0
     return None

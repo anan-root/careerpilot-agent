@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from platform_registry import platform_label, platform_label_text
+
 
 def build_agent_search_report(result: dict[str, Any]) -> str:
     """Build a beginner-readable, action-oriented Markdown report."""
@@ -24,7 +26,7 @@ def build_agent_search_report(result: dict[str, Any]) -> str:
         f"- 城市：{_clean(plan.get('location') or '上海')}",
         f"- 主关键词：{_clean(plan.get('keyword') or '')}",
         f"- 岗位类型：{_join(plan.get('job_types')) or '未限制'}",
-        f"- 使用平台：{_join(plan.get('platforms')) or '默认平台'}",
+        f"- 使用平台：{platform_label_text(plan.get('platforms'))}",
         f"- 展示结果：{len(jobs)} 个",
         "",
     ]
@@ -280,7 +282,7 @@ def _field_counts_text(field_counts: dict[str, Any]) -> str:
 
 
 def _dict_text(value: dict[str, Any]) -> str:
-    return "，".join(f"{_clean(k)} {v}" for k, v in value.items()) or "无"
+    return "，".join(f"{platform_label(_clean(k))} {v}" for k, v in value.items()) or "无"
 
 
 def _join(value: Any) -> str:

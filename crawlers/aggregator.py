@@ -18,12 +18,27 @@ from typing import Literal
 
 import db
 from job_filters import enrich_job_fields, filter_jobs
+from platform_registry import DEFAULT_PLATFORM_CODES, normalize_platforms
 
 logger = logging.getLogger(__name__)
 
-Platform = Literal["boss", "boss_drission", "boss_cookie", "nowcoder", "liepin", "zhilian", "51job", "curated"]
+Platform = Literal[
+    "boss",
+    "boss_drission",
+    "boss_cookie",
+    "nowcoder",
+    "liepin",
+    "zhilian",
+    "51job",
+    "lagou",
+    "yingjiesheng",
+    "guopin",
+    "dingxiang",
+    "jobonline",
+    "curated",
+]
 
-DEFAULT_PLATFORMS: list[Platform] = ["nowcoder", "liepin", "zhilian", "51job"]
+DEFAULT_PLATFORMS: list[str] = list(DEFAULT_PLATFORM_CODES)
 LAST_SEARCH_SUMMARY: dict = {}
 
 
@@ -55,6 +70,8 @@ def collect_all_jobs(
     """
     if platforms is None:
         platforms = list(DEFAULT_PLATFORMS)
+    else:
+        platforms = normalize_platforms(platforms)
 
     all_jobs: list[dict] = []
     keywords = (
@@ -227,6 +244,10 @@ def _fetch_platform(
     elif platform == "51job":
         from crawlers.job51 import search_51job
         return search_51job(keyword, location, max_pages=max_pages, use_browser=use_browser_crawlers)
+
+    elif platform in {"lagou", "yingjiesheng", "guopin", "dingxiang", "jobonline"}:
+        from crawlers.generic_platforms import search_generic_platform
+        return search_generic_platform(platform, keyword, location, max_pages=max_pages)
 
     elif platform == "curated":
         from crawlers.boss import search_boss_jobs

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from memory.store import load_agent_run, load_agent_runs
+from platform_registry import platform_label
 
 
 def answer_agent_question(question: str, context: dict[str, Any] | None = None) -> str:
@@ -108,15 +109,19 @@ def _answer_low_results(context: dict[str, Any]) -> str:
     ]
     if criteria.get("job_types") == ["社招"] or plan.get("job_types") == ["社招"]:
         reasons.append("当前只保留社招/全职，会排除实习和校招。")
+    elif set(criteria.get("job_types") or plan.get("job_types") or []) == {"社招", "校招"}:
+        reasons.append("当前保留社招和校招，但会排除实习岗位。")
     if type_counts:
         reasons.append(f"这次原始类型分布是：{_dict_text(type_counts)}。")
     if criteria.get("min_salary_k"):
         reasons.append(f"薪资下限设为 {criteria.get('min_salary_k')}K，低于预期的岗位会被过滤或降权。")
+    if criteria.get("max_salary_k"):
+        reasons.append(f"薪资上限设为 {criteria.get('max_salary_k')}K，高于预期的岗位会被过滤。")
     if criteria.get("max_experience_years") is not None:
         reasons.append(f"经验上限设为 {criteria.get('max_experience_years')} 年以内，经验门槛高的岗位会被过滤或标风险。")
     if criteria.get("weekend_only"):
         reasons.append("双休优先会进一步收窄结果；未知双休会保留，但明确非双休会被压低。")
-    reasons.append("想增加结果量，可以先把页数调到 2-3，或暂时取消双休优先，再保留“不要实习/不要校招”。")
+    reasons.append("想增加结果量，可以先把页数调到 2-3，或暂时取消双休优先；当前仍建议保留“不要实习”。")
     return "\n\n".join(reasons)
 
 
@@ -125,9 +130,10 @@ def _answer_platforms(context: dict[str, Any]) -> str:
     if not platform_counts:
         return "这次没有可用的平台分布记录。建议重新运行一次 Agent 搜索，它会记录每个平台抓取、筛选和最终展示数量。"
     best = max(platform_counts.items(), key=lambda item: item[1])
+    readable_counts = {platform_label(key): value for key, value in platform_counts.items()}
     return (
-        f"最终结果的平台分布是：{_dict_text(platform_counts)}。\n\n"
-        f"这次贡献最多的是 {best[0]}，最终留下 {best[1]} 个岗位。平台越多不一定展示越多，因为最终表格会继续按社招、薪资、经验、双休、去重和推荐排序筛选。"
+        f"最终结果的平台分布是：{_dict_text(readable_counts)}。\n\n"
+        f"这次贡献最多的是 {platform_label(best[0])}，最终留下 {best[1]} 个岗位。平台越多不一定展示越多，因为最终表格会继续按社招、薪资、经验、双休、去重和推荐排序筛选。"
     )
 
 

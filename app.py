@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 from pathlib import Path
 from datetime import datetime
+from html import escape
 
 import pandas as pd
 import streamlit as st
@@ -27,8 +29,18 @@ from crawlers.aggregator import collect_all_jobs, get_last_search_summary
 from job_filters import filter_jobs
 from llm_client import get_llm_config
 from memory.store import export_memory_snapshot, load_agent_runs, save_application_record, save_job_feedback
+from platform_registry import (
+    DEFAULT_PLATFORM_CODES,
+    PLATFORM_LABELS,
+    PLATFORM_ORDER,
+    normalize_platform,
+    platform_label,
+    platform_label_text,
+)
 
 OUTPUT_DIR = Path(__file__).parent / "data" / "outputs"
+DEFAULT_AGENT_GOAL = "帮我找上海 AI Agent 岗位，我是去年毕业的，薪资 20K 以内，社招和校招都可以，双休优先，不要实习。"
+OLD_DEFAULT_AGENT_GOAL = "帮我找上海 AI Agent 社招，薪资 20K 以上，3 年以内，双休优先，不要实习不要校招。"
 
 
 st.set_page_config(page_title="CareerPilot Agent", page_icon="CP", layout="wide")
@@ -53,37 +65,75 @@ def save_upload(uploaded_file) -> Path:
 
 
 def jobs_to_frame(jobs: list[dict]) -> pd.DataFrame:
-    rows = []
-    for job in jobs:
-        match = job.get("resume_match", {})
-        decision = job.get("job_decision", {})
-        rows.append({
-            "推荐等级": decision.get("level", ""),
-            "推荐分": decision.get("score", ""),
-            "匹配分": match.get("score", 0),
-            "公司": job.get("company", ""),
-            "岗位": job.get("title", ""),
-            "地点": job.get("location", ""),
-            "公司地址": job.get("company_address", ""),
-            "薪资": job.get("salary", ""),
-            "月薪范围K": _salary_range_text(job),
-            "经验": job.get("experience_display") or job.get("experience", ""),
-            "学历": job.get("degree_display") or job.get("degree", ""),
-            "双休": job.get("weekend_display") or job.get("weekend_policy", ""),
-            "福利": job.get("welfare", ""),
-            "类型": job.get("normalized_job_type") or job.get("job_type", ""),
-            "抓取": job.get("crawl_status", ""),
-            "详情": job.get("detail_status", ""),
-            "关键词": job.get("crawl_keyword", ""),
-            "来源": job.get("platform", ""),
-            "链接": job.get("source_url") or job.get("url", ""),
-            "推荐理由": "；".join(decision.get("matched_reasons", [])[:3]),
-            "风险": "；".join(decision.get("risks", [])[:3]),
-            "命中关键词": ", ".join(match.get("matched_keywords", [])[:12]),
-            "缺口关键词": ", ".join(match.get("missing_keywords", [])[:12]),
-            "建议": match.get("summary", ""),
-        })
-    return pd.DataFrame(rows)
+    return search_jobs_to_frame(jobs, show_recommendation=True)
+
+
+def platform_key(value: object) -> str:
+    code = normalize_platform(str(value or "").strip())
+    if code in {"boss_drission", "boss_cookie"}:
+        return "boss"
+    return code
+
+
+def platform_keys(values: list[str] | tuple[str, ...] | set[str] | None) -> list[str]:
+    keys: list[str] = []
+    for value in values or []:
+        key = platform_key(value)
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def platform_display_order(selected_platforms: list[str] | tuple[str, ...] | set[str] | None) -> list[str]:
+    selected_keys = set(platform_keys(selected_platforms or DEFAULT_PLATFORM_CODES))
+    order: list[str] = []
+    for source in (DEFAULT_PLATFORM_CODES, selected_platforms or [], PLATFORM_ORDER):
+        for value in source:
+            key = platform_key(value)
+            if key and key not in order and (key in selected_keys or source is PLATFORM_ORDER):
+                order.append(key)
+    return order
+
+
+def filter_jobs_by_platforms(jobs: list[dict], selected_platforms: list[str] | tuple[str, ...] | set[str] | None) -> list[dict]:
+    selected_keys = set(platform_keys(selected_platforms or DEFAULT_PLATFORM_CODES))
+    if not selected_keys:
+        return list(jobs)
+    return [job for job in jobs if platform_key(job.get("platform", "")) in selected_keys]
+
+
+def filter_jobs_by_location(jobs: list[dict], location: str | None) -> list[dict]:
+    target = clean_display_value(location)
+    if not target:
+        return list(jobs)
+    return [
+        job for job in jobs
+        if target in clean_display_value(job.get("location", ""))
+        or target in clean_display_value(job.get("company_address", ""))
+        or target in clean_display_value(job.get("address", ""))
+    ]
+
+
+def sort_jobs_by_platform_priority(jobs: list[dict], selected_platforms: list[str] | tuple[str, ...] | set[str] | None) -> list[dict]:
+    order = platform_display_order(selected_platforms)
+    priority = {code: index for index, code in enumerate(order)}
+    return sorted(jobs, key=lambda job: priority.get(platform_key(job.get("platform", "")), len(priority) + 1))
+
+
+def prepare_jobs_for_display(
+    source_jobs: list[dict],
+    *,
+    selected_platforms: list[str] | tuple[str, ...] | set[str] | None,
+    location: str | None = None,
+    criteria: dict | None,
+    already_filtered: bool,
+) -> list[dict]:
+    jobs = list(source_jobs)
+    if not already_filtered:
+        jobs = filter_jobs(jobs, criteria)
+    jobs = filter_jobs_by_location(jobs, location)
+    jobs = filter_jobs_by_platforms(jobs, selected_platforms)
+    return sort_jobs_by_platform_priority(jobs, selected_platforms)
 
 
 UNKNOWN_MARKERS = {
@@ -101,6 +151,58 @@ UNKNOWN_MARKERS = {
     "nan",
 }
 
+COMPANY_SIZE_PATTERN = re.compile(r"(?:少于)?\d+\s*-\s*\d+\s*人|\d+\s*人以上|\d+\s*-\s*\d+\s*人|10000人以上")
+TITLE_SALARY_PATTERN = re.compile(
+    r"(?:\d+(?:\.\d+)?\s*[-~]\s*\d+(?:\.\d+)?\s*[kK](?:·\d+薪)?)|"
+    r"(?:\d+(?:\.\d+)?\s*[kK](?:·\d+薪)?)|"
+    r"(?:\d+\s*-\s*\d+\s*元/天)|"
+    r"(?:薪资面议)",
+    re.IGNORECASE,
+)
+TITLE_EXPERIENCE_PATTERN = re.compile(r"(?:经验不限|不限经验|无需经验|应届生|\d+\s*-\s*\d+\s*年|\d+\s*年以上?|\d+\s*年以内?)")
+TITLE_DEGREE_PATTERN = re.compile(r"(博士|硕士|本科|大专|学历不限|不限)")
+CITY_NAMES = ("上海", "北京", "杭州", "深圳", "广州", "成都", "南京", "武汉", "苏州", "西安", "重庆", "天津")
+COMPANY_INDUSTRY_TOKENS = (
+    "企业服务",
+    "互联网",
+    "人工智能",
+    "智能硬件",
+    "医疗健康",
+    "金融",
+    "基金",
+    "证券",
+    "咨询",
+    "软件",
+    "电子商务",
+    "游戏",
+    "广告营销",
+    "数据服务",
+    "大数据",
+    "云计算",
+    "通信",
+    "汽车",
+    "新能源",
+    "机器人",
+    "教育",
+    "贸易",
+    "物流",
+    "制造业",
+)
+COMPANY_NAME_INDUSTRY_RULES = (
+    (("私募", "基金", "证券", "期货", "资管", "资产管理", "投资"), "金融/基金"),
+    (("人工智能", "智能科技", "AI", "Ai", "ai"), "人工智能"),
+    (("人才", "人力资源", "猎头", "招聘"), "人力资源"),
+    (("管理咨询", "咨询"), "咨询服务"),
+    (("教育", "培训", "学校", "大学"), "教育"),
+    (("医疗", "医药", "健康", "生物"), "医疗健康"),
+    (("软件", "网络科技", "信息科技", "互联网"), "互联网/软件"),
+    (("通信", "通讯"), "通信"),
+    (("汽车", "新能源"), "汽车/新能源"),
+    (("机器人",), "机器人"),
+)
+INLINE_NOISE_TOKENS = ("未知", "暂无")
+TITLE_NOISE_TOKENS = ("直达官网投后必反馈", "绑定官网账号并投递", "官网闪投")
+
 INSURANCE_TOKENS = (
     "五险一金",
     "五险",
@@ -111,6 +213,22 @@ INSURANCE_TOKENS = (
     "补充医疗",
     "商业保险",
 )
+
+RECOMMENDATION_TIERS = (
+    {"min": 90, "level": "王牌机会", "class": "gold"},
+    {"min": 80, "level": "强烈推荐", "class": "orange"},
+    {"min": 70, "level": "优先关注", "class": "purple"},
+    {"min": 60, "level": "可以投递", "class": "blue"},
+    {"min": 50, "level": "备选岗位", "class": "green"},
+    {"min": 0, "level": "普通岗位", "class": "white"},
+)
+
+LEGACY_LEVEL_SCORES = {
+    "强推": 85,
+    "可投": 65,
+    "谨慎": 52,
+    "不建议": 35,
+}
 
 
 def clean_display_value(value) -> str:
@@ -146,6 +264,226 @@ def extract_weekend_text(job: dict) -> str:
     return ""
 
 
+def first_display_value(job: dict, keys: tuple[str, ...] | list[str]) -> str:
+    for key in keys:
+        value = clean_display_value(job.get(key, ""))
+        if value:
+            return value
+    return ""
+
+
+def trim_display_text(value, limit: int = 140) -> str:
+    text = clean_display_value(value)
+    if not text:
+        return ""
+    text = " ".join(text.replace("\r", " ").replace("\n", " ").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def labeled_parts(items: list[tuple[str, str]], *, separator: str = " · ") -> str:
+    parts = [f"{label}：{value}" for label, value in items if clean_display_value(value)]
+    return separator.join(parts)
+
+
+def compact_text(text: str) -> str:
+    return " ".join(str(text or "").replace("\r", " ").replace("\n", " ").split()).strip()
+
+
+def strip_inline_noise(text: str, *, strip_general: bool = False) -> str:
+    result = str(text or "")
+    for token in INLINE_NOISE_TOKENS:
+        result = result.replace(token, "")
+    if strip_general:
+        result = result.replace("综合", "")
+    return compact_text(result)
+
+
+def normalize_company_size(value: str) -> str:
+    text = strip_inline_noise(clean_display_value(value), strip_general=True)
+    match = COMPANY_SIZE_PATTERN.search(text)
+    return match.group(0).replace(" ", "") if match else ""
+
+
+def infer_company_size(job: dict) -> str:
+    return normalize_company_size(job.get("company_size", "")) or normalize_company_size(job.get("company", ""))
+
+
+def normalize_company_industry(value: str) -> str:
+    text = strip_inline_noise(clean_display_value(value), strip_general=True)
+    if not text:
+        return ""
+    for token in COMPANY_INDUSTRY_TOKENS:
+        if token in text:
+            return token
+    return text if len(text) <= 8 else ""
+
+
+def infer_company_industry(job: dict) -> str:
+    company_name = display_company_name(job)
+    for keywords, industry in COMPANY_NAME_INDUSTRY_RULES:
+        if any(keyword in company_name for keyword in keywords):
+            return industry
+
+    text = str(job.get("company", "") or "")
+    text = COMPANY_SIZE_PATTERN.sub("", text)
+    text = strip_inline_noise(text, strip_general=True)
+    for token in sorted(COMPANY_INDUSTRY_TOKENS, key=len, reverse=True):
+        if text.endswith(token):
+            return token
+
+    return normalize_company_industry(job.get("company_industry", ""))
+
+
+def display_company_name(job: dict) -> str:
+    text = str(job.get("company", "") or "")
+    if not clean_display_value(text):
+        return ""
+    text = COMPANY_SIZE_PATTERN.sub("", text)
+    text = strip_inline_noise(text, strip_general=True)
+    for token in sorted(COMPANY_INDUSTRY_TOKENS, key=len, reverse=True):
+        if text.endswith(token):
+            text = text[: -len(token)].strip()
+            break
+    return text.strip(" -｜|·，,")
+
+
+def display_job_title(job: dict) -> str:
+    raw = compact_text(clean_display_value(job.get("title", "")))
+    if not raw:
+        return ""
+
+    title = re.sub(r"^(社招|校招|实习|日常实习|暑期实习|全职)\s*[|｜·\-]\s*", "", raw)
+    salary = salary_text(job)
+    if salary and salary in title:
+        title = title[: title.find(salary)]
+    else:
+        salary_match = TITLE_SALARY_PATTERN.search(title)
+        if salary_match:
+            title = title[: salary_match.start()]
+
+    for token in TITLE_NOISE_TOKENS:
+        title = title.replace(token, "")
+    title = re.sub(r"^(社招|校招|实习|日常实习|暑期实习|全职)\s*[|｜·\-]\s*", "", title)
+    title = re.sub(rf"({'|'.join(CITY_NAMES)})(?=(?:{TITLE_EXPERIENCE_PATTERN.pattern}|{TITLE_DEGREE_PATTERN.pattern}))", "", title)
+    title = TITLE_EXPERIENCE_PATTERN.sub("", title)
+    title = TITLE_DEGREE_PATTERN.sub("", title)
+    title = compact_text(title).strip(" -｜|·，,")
+    title = re.sub(r"(.{2,12}?工程师)工程师$", r"\1", title)
+    return title or raw
+
+
+def display_experience_text(job: dict) -> str:
+    value = clean_display_value(job.get("experience_display") or job.get("experience", ""))
+    if re.fullmatch(r"\d+年以", value):
+        return f"{value}内"
+    return value
+
+
+def company_founded_text(job: dict) -> str:
+    return first_display_value(
+        job,
+        (
+            "company_founded",
+            "company_founded_at",
+            "company_found_date",
+            "founded_at",
+            "founded_date",
+            "established_at",
+            "established_date",
+        ),
+    )
+
+
+def job_type_text(job: dict) -> str:
+    return clean_display_value(job.get("normalized_job_type") or job.get("job_type", ""))
+
+
+def salary_text(job: dict) -> str:
+    return clean_display_value(job.get("salary", "")) or _salary_range_text(job)
+
+
+def compact_requirements(job: dict, limit: int = 260) -> str:
+    text = first_display_value(job, ("requirements", "description", "full_jd"))
+    text = trim_display_text(text.replace(";", "；"), limit=limit)
+    return text
+
+
+def parse_recommendation_score(value) -> float | None:
+    if value is None or value is False:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        if text.endswith("%"):
+            score = float(text[:-1])
+        else:
+            score = float(text)
+    except ValueError:
+        return None
+    return round(max(0.0, min(100.0, score)), 1)
+
+
+def recommendation_view(job: dict) -> dict:
+    decision = job.get("job_decision") or {}
+    match = job.get("resume_match") or {}
+    legacy_level = clean_display_value(decision.get("level", ""))
+    score = parse_recommendation_score(decision.get("score"))
+    if score is None:
+        score = parse_recommendation_score(match.get("score"))
+    if score is None and legacy_level in LEGACY_LEVEL_SCORES:
+        score = float(LEGACY_LEVEL_SCORES[legacy_level])
+    if score is None:
+        return {"level": "未评估", "score": None, "class": "white"}
+    for tier in RECOMMENDATION_TIERS:
+        if score >= tier["min"]:
+            return {"level": tier["level"], "score": score, "class": tier["class"]}
+    return {"level": "普通岗位", "score": score, "class": "white"}
+
+
+def build_company_block(job: dict, visible: dict[str, bool]) -> str:
+    company = display_company_name(job)
+    lines = [company] if company else []
+    meta = labeled_parts([
+        ("规模", infer_company_size(job)),
+        ("行业", infer_company_industry(job)),
+    ])
+    if meta:
+        lines.append(meta)
+    founded = company_founded_text(job)
+    if founded:
+        lines.append(f"成立：{founded}")
+    address = clean_display_value(job.get("company_address", ""))
+    if visible.get("address") and address:
+        lines.append(f"地址：{address}")
+    return "\n".join(lines)
+
+
+def build_job_block(job: dict, visible: dict[str, bool]) -> str:
+    title = display_job_title(job)
+    lines = [title] if title else []
+    requirement_line = labeled_parts([
+        ("薪资", salary_text(job)),
+        ("学历", clean_display_value(job.get("degree_display") or job.get("degree", ""))),
+        ("经验", display_experience_text(job)),
+    ])
+    if requirement_line:
+        lines.append(requirement_line)
+    work_line = labeled_parts([
+        ("类型", job_type_text(job)),
+        ("地点", clean_display_value(job.get("location", ""))),
+        ("双休", extract_weekend_text(job) if visible.get("weekend") else ""),
+    ])
+    if work_line:
+        lines.append(work_line)
+    welfare = trim_display_text(job.get("welfare", ""), limit=120)
+    if visible.get("welfare") and welfare:
+        lines.append(f"福利：{welfare}")
+    return "\n".join(lines)
+
+
 def should_show_optional_column(jobs: list[dict], extractor) -> bool:
     return any(has_display_value(extractor(job)) for job in jobs)
 
@@ -155,126 +493,164 @@ def visible_job_columns(jobs: list[dict], *, show_recommendation: bool) -> dict[
         "recommendation": show_recommendation,
         "address": should_show_optional_column(jobs, lambda job: job.get("company_address")),
         "weekend": should_show_optional_column(jobs, extract_weekend_text),
-        "insurance": should_show_optional_column(jobs, lambda job: extract_insurance_text(job.get("welfare", ""))),
         "welfare": should_show_optional_column(jobs, lambda job: job.get("welfare")),
     }
-
-
-def job_table_column_config(show_recommendation: bool) -> dict:
-    config = {
-        "公司": st.column_config.TextColumn("公司", width="medium"),
-        "岗位": st.column_config.TextColumn("岗位", width="large"),
-        "薪资": st.column_config.TextColumn("薪资", width="small"),
-        "经验": st.column_config.TextColumn("经验", width="small"),
-        "学历": st.column_config.TextColumn("学历", width="small"),
-        "地点": st.column_config.TextColumn("地点", width="small"),
-        "来源": st.column_config.TextColumn("来源", width="small"),
-        "链接": st.column_config.LinkColumn("链接", width="small", display_text="打开"),
-    }
-    if show_recommendation:
-        config.update({
-            "推荐等级": st.column_config.TextColumn("推荐等级", width="small"),
-            "推荐分": st.column_config.NumberColumn("推荐分", width="small"),
-            "推荐理由": st.column_config.TextColumn("推荐理由", width="large"),
-            "风险": st.column_config.TextColumn("风险", width="medium"),
-        })
-    return config
 
 
 def search_jobs_to_frame(jobs: list[dict], *, show_recommendation: bool = True) -> pd.DataFrame:
     visible = visible_job_columns(jobs, show_recommendation=show_recommendation)
     rows = []
     for job in jobs:
-        decision = job.get("job_decision", {})
-        welfare = clean_display_value(job.get("welfare", ""))
-        weekend = extract_weekend_text(job)
         row = {
-            "公司": clean_display_value(job.get("company", "")),
-            "岗位": clean_display_value(job.get("title", "")),
-            "薪资": clean_display_value(job.get("salary", "")) or _salary_range_text(job),
-            "经验": clean_display_value(job.get("experience_display") or job.get("experience", "")),
-            "学历": clean_display_value(job.get("degree_display") or job.get("degree", "")),
-            "地点": clean_display_value(job.get("location", "")),
-            "来源": clean_display_value(job.get("platform", "")),
-            "链接": clean_display_value(job.get("source_url") or job.get("url", "")),
+            "公司": build_company_block(job, visible),
+            "岗位": build_job_block(job, visible),
         }
-        if visible["address"]:
-            row["公司地址"] = clean_display_value(job.get("company_address", ""))
-        if visible["weekend"]:
-            row["双休情况"] = weekend
-        if visible["insurance"]:
-            row["五险一金"] = extract_insurance_text(welfare)
-        if visible["welfare"]:
-            row["福利情况"] = welfare
         if show_recommendation:
+            recommendation = recommendation_view(job)
             row = {
-                "推荐等级": decision.get("level", ""),
-                "推荐分": decision.get("score", ""),
+                "推荐等级": recommendation["level"],
+                "推荐分": recommendation["score"],
                 **row,
-                "推荐理由": "；".join(decision.get("matched_reasons", [])[:3]),
-                "风险": "；".join(decision.get("risks", [])[:3]),
             }
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+def block_lines_html(text: str) -> str:
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+    html = [f'<div class="cp-table-main">{escape(lines[0])}</div>']
+    html.extend(f'<div class="cp-table-sub">{escape(line)}</div>' for line in lines[1:])
+    return "".join(html)
+
+
+def render_job_table(jobs: list[dict], limit: int, *, show_recommendation: bool = True):
+    visible = visible_job_columns(jobs, show_recommendation=show_recommendation)
+    headers = []
+    if show_recommendation:
+        headers.append('<th class="cp-table-reco-col">推荐</th>')
+    headers.extend(["<th>公司</th>", "<th>岗位</th>"])
+
+    rows = []
+    for job in jobs[:limit]:
+        recommendation = recommendation_view(job)
+        cells = []
+        if show_recommendation:
+            score_text = "" if recommendation["score"] is None else f'{recommendation["score"]:.1f}'
+            cells.append(
+                '<td class="cp-table-reco-cell">'
+                f'<span class="cp-level {escape(recommendation["class"])}">{escape(recommendation["level"])}</span>'
+                f'<div class="cp-table-score">{escape(score_text)}</div>'
+                '</td>'
+            )
+        cells.extend([
+            f'<td>{block_lines_html(build_company_block(job, visible))}</td>',
+            f'<td>{block_lines_html(build_job_block(job, visible))}</td>',
+        ])
+        rows.append(
+            f'<tr class="tier-{escape(recommendation["class"] if show_recommendation else "white")}">'
+            + "".join(cells)
+            + "</tr>"
+        )
+
+    table_html = (
+        '<div class="cp-job-table-wrap">'
+        '<table class="cp-job-table">'
+        f'<thead><tr>{"".join(headers)}</tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody>'
+        '</table>'
+        '</div>'
+    )
+    st.markdown(table_html, unsafe_allow_html=True)
 
 
 def render_job_cards(jobs: list[dict], limit: int = 20, *, show_recommendation: bool = True):
     visible = visible_job_columns(jobs, show_recommendation=show_recommendation)
     for index, job in enumerate(jobs[:limit], 1):
         decision = job.get("job_decision", {})
-        level = decision.get("level", "未评估")
-        score = decision.get("score", "")
-        title = job.get("title", "")
-        company = job.get("company", "")
-        platform = job.get("platform", "")
-        salary = job.get("salary", "")
-        location = job.get("location", "")
+        recommendation = recommendation_view(job)
+        title = display_job_title(job)
+        company = display_company_name(job)
+        platform = clean_display_value(job.get("platform", ""))
+        location = clean_display_value(job.get("location", ""))
         address = clean_display_value(job.get("company_address", ""))
-        experience = clean_display_value(job.get("experience_display") or job.get("experience", ""))
+        industry = infer_company_industry(job)
+        company_size = infer_company_size(job)
+        founded = company_founded_text(job)
+        salary = salary_text(job)
+        experience = display_experience_text(job)
         degree = clean_display_value(job.get("degree_display") or job.get("degree", ""))
         weekend = extract_weekend_text(job)
         welfare = clean_display_value(job.get("welfare", ""))
-        insurance = extract_insurance_text(welfare)
         reasons = decision.get("matched_reasons", [])[:3]
         risks = decision.get("risks", [])[:3]
         resume_actions = decision.get("resume_actions", [])[:2]
-        url = job.get("source_url") or job.get("url", "")
-
-        with st.container(border=True):
-            top_cols = st.columns([4, 1, 1]) if show_recommendation else st.columns([1])
-            with top_cols[0]:
-                st.markdown(f"**{index}. {company} - {title}**")
-                meta = [item for item in (platform, location, address if visible["address"] else "") if item]
-                st.caption(" / ".join(meta))
-            if show_recommendation:
-                with top_cols[1]:
-                    st.metric("推荐", level)
-                with top_cols[2]:
-                    st.metric("分数", score)
-
-            info_items = [
-                ("薪资", salary),
-                ("经验", experience),
-                ("学历", degree),
-            ]
-            if visible["weekend"] and weekend:
-                info_items.append(("双休", weekend))
-            if visible["insurance"] and insurance:
-                info_items.append(("五险一金", insurance))
-            info_cols = st.columns(min(4, max(1, len(info_items))))
-            for idx, (label, value) in enumerate(info_items):
-                info_cols[idx % len(info_cols)].write(f"{label}：{value or '未知'}")
-
-            if visible["welfare"] and welfare:
-                st.caption(f"福利：{welfare}")
-            if show_recommendation and reasons:
-                st.markdown("推荐理由：" + "；".join(reasons))
-            if show_recommendation and risks:
-                st.warning("风险：" + "；".join(risks))
-            if show_recommendation and resume_actions:
-                st.info("简历动作：" + "；".join(resume_actions))
-            if url:
-                st.link_button("打开岗位来源", url)
+        posted_date = clean_display_value(job.get("posted_date", ""))
+        requirement_brief = compact_requirements(job)
+        url = clean_display_value(job.get("source_url") or job.get("url", ""))
+        meta_line = labeled_parts([
+            ("薪资", salary),
+            ("学历", degree),
+            ("经验", experience),
+            ("类型", job_type_text(job)),
+            ("地点", location),
+            ("双休", weekend if visible.get("weekend") else ""),
+        ])
+        company_line = labeled_parts([
+            ("规模", company_size),
+            ("行业", industry),
+            ("成立", founded),
+            ("地址", address if visible.get("address") else ""),
+        ])
+        welfare_line = trim_display_text(welfare, limit=180) if visible.get("welfare") else ""
+        recommendation_html = ""
+        if show_recommendation:
+            score_text = "" if recommendation["score"] is None else f'{recommendation["score"]:.1f}'
+            recommendation_html = (
+                f'<div class="cp-card-score">'
+                f'<span>{escape(recommendation["level"])}</span>'
+                f'<strong>{escape(score_text)}</strong>'
+                f'</div>'
+            )
+        detail_rows = []
+        for label, value in (
+            ("岗位发布时间", posted_date),
+            ("公司信息", company_line),
+            ("简略招聘要求", requirement_brief),
+            ("推荐理由", "；".join(reasons) if show_recommendation else ""),
+            ("风险提醒", "；".join(risks) if show_recommendation else ""),
+            ("简历动作", "；".join(resume_actions) if show_recommendation else ""),
+            ("来源平台", platform),
+        ):
+            if clean_display_value(value):
+                detail_rows.append(
+                    f'<div class="cp-card-detail-row"><span>{escape(label)}</span><p>{escape(str(value))}</p></div>'
+                )
+        link_html = f'<a class="cp-card-link" href="{escape(url, quote=True)}" target="_blank">打开岗位来源</a>' if url else ""
+        company_html = f'<div class="cp-card-company">{escape(company)}</div>' if company else ""
+        welfare_html = f'<div class="cp-card-welfare">福利：{escape(welfare_line)}</div>' if welfare_line else ""
+        card_class = escape(recommendation["class"] if show_recommendation else "white")
+        card_html = (
+            f'<details class="cp-job-card tier-{card_class}">'
+            '<summary>'
+            '<div class="cp-card-head">'
+            '<div class="cp-card-main">'
+            f'<div class="cp-card-title">{index}. {escape(title)}</div>'
+            f'{company_html}'
+            '</div>'
+            f'{recommendation_html}'
+            '</div>'
+            f'<div class="cp-card-meta">{escape(meta_line)}</div>'
+            f'{welfare_html}'
+            '</summary>'
+            '<div class="cp-card-detail">'
+            f'{"".join(detail_rows)}'
+            f'{link_html}'
+            '</div>'
+            '</details>'
+        )
+        st.markdown(card_html, unsafe_allow_html=True)
 
 
 def _salary_range_text(job: dict) -> str:
@@ -322,7 +698,7 @@ def run_search(
     st.session_state["manual_search_signature"] = signature
     st.session_state["active_search_source"] = "manual"
     st.session_state["last_search_label"] = (
-        f"{location} / {keyword} / 平台:{', '.join(platforms or ['全部'])} / "
+        f"{location} / {keyword} / 平台:{platform_label_text(platforms)} / "
         f"页数:{int(max_pages)} / 类型:{', '.join(criteria.get('job_types') or ['全部'])}"
     )
     st.session_state["search_dirty"] = False
@@ -350,6 +726,13 @@ def inject_design_system():
             --cp-blue-soft: #eff6ff;
             --cp-amber-soft: #fffbeb;
             --cp-red-soft: #fef2f2;
+            --cp-gold-soft: #fff7d6;
+            --cp-gold-border: #f0c04a;
+            --cp-orange-soft: #fff1e6;
+            --cp-orange-border: #fb923c;
+            --cp-purple-soft: #f5f0ff;
+            --cp-purple-border: #a78bfa;
+            --cp-green-border: #86efac;
         }
         .stApp {
             background: var(--cp-bg);
@@ -524,6 +907,255 @@ def inject_design_system():
             background: var(--cp-red-soft);
             border-color: #fecaca;
         }
+        .cp-level.gold {
+            color: #854d0e;
+            background: var(--cp-gold-soft);
+            border-color: var(--cp-gold-border);
+        }
+        .cp-level.orange {
+            color: #9a3412;
+            background: var(--cp-orange-soft);
+            border-color: var(--cp-orange-border);
+        }
+        .cp-level.purple {
+            color: #6d28d9;
+            background: var(--cp-purple-soft);
+            border-color: var(--cp-purple-border);
+        }
+        .cp-level.blue {
+            color: var(--cp-blue);
+            background: var(--cp-blue-soft);
+            border-color: #bfdbfe;
+        }
+        .cp-level.green {
+            color: var(--cp-teal);
+            background: var(--cp-green-soft);
+            border-color: var(--cp-green-border);
+        }
+        .cp-level.white {
+            color: var(--cp-muted);
+            background: var(--cp-surface);
+            border-color: var(--cp-border);
+        }
+        .cp-job-table-wrap {
+            border: 1px solid var(--cp-border);
+            border-radius: 8px;
+            background: var(--cp-surface);
+            overflow: auto;
+            max-height: 640px;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+        }
+        .cp-job-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            table-layout: fixed;
+            font-size: 0.84rem;
+        }
+        .cp-job-table th {
+            position: sticky;
+            top: 0;
+            z-index: 1;
+            background: #f8fafc;
+            color: var(--cp-muted);
+            text-align: left;
+            font-weight: 720;
+            padding: 0.72rem 0.85rem;
+            border-bottom: 1px solid var(--cp-border);
+        }
+        .cp-job-table th:first-child,
+        .cp-job-table td:first-child {
+            border-left: 0;
+        }
+        .cp-job-table td {
+            vertical-align: top;
+            padding: 0.82rem 0.85rem;
+            border-bottom: 1px solid var(--cp-border);
+            border-left: 1px solid #eef2f7;
+            line-height: 1.55;
+            word-break: break-word;
+        }
+        .cp-job-table tbody tr:last-child td {
+            border-bottom: 0;
+        }
+        .cp-job-table tbody tr.tier-gold td:first-child {
+            border-left: 5px solid var(--cp-gold-border);
+        }
+        .cp-job-table tbody tr.tier-orange td:first-child {
+            border-left: 5px solid var(--cp-orange-border);
+        }
+        .cp-job-table tbody tr.tier-purple td:first-child {
+            border-left: 5px solid var(--cp-purple-border);
+        }
+        .cp-job-table tbody tr.tier-blue td:first-child {
+            border-left: 5px solid #93c5fd;
+        }
+        .cp-job-table tbody tr.tier-green td:first-child {
+            border-left: 5px solid var(--cp-green-border);
+        }
+        .cp-table-main {
+            color: var(--cp-text);
+            font-weight: 740;
+            line-height: 1.45;
+            margin-bottom: 0.3rem;
+        }
+        .cp-table-sub {
+            color: var(--cp-muted);
+            line-height: 1.65;
+        }
+        .cp-table-reco-col {
+            width: 7rem;
+        }
+        .cp-table-reco-cell {
+            text-align: left;
+            background: #fcfcfd;
+        }
+        .cp-table-score {
+            margin-top: 0.4rem;
+            color: var(--cp-text);
+            font-size: 1.05rem;
+            font-weight: 760;
+        }
+        .cp-job-card {
+            display: block;
+            border: 1px solid var(--cp-border);
+            border-left-width: 5px;
+            border-radius: 8px;
+            background: var(--cp-surface);
+            padding: 0.85rem 0.95rem;
+            margin: 0.65rem 0;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+        }
+        .cp-job-card summary {
+            list-style: none;
+            cursor: pointer;
+        }
+        .cp-job-card summary::-webkit-details-marker {
+            display: none;
+        }
+        .cp-job-card summary::after {
+            content: "展开详情";
+            display: inline-flex;
+            margin-top: 0.55rem;
+            color: var(--cp-muted);
+            font-size: 0.78rem;
+        }
+        .cp-job-card[open] summary::after {
+            content: "收起详情";
+        }
+        .cp-job-card.tier-gold {
+            background: linear-gradient(180deg, #fffaf0 0%, #ffffff 72%);
+            border-left-color: var(--cp-gold-border);
+        }
+        .cp-job-card.tier-orange {
+            background: linear-gradient(180deg, #fff7ed 0%, #ffffff 72%);
+            border-left-color: var(--cp-orange-border);
+        }
+        .cp-job-card.tier-purple {
+            background: linear-gradient(180deg, #faf5ff 0%, #ffffff 72%);
+            border-left-color: var(--cp-purple-border);
+        }
+        .cp-job-card.tier-blue {
+            background: linear-gradient(180deg, #eff6ff 0%, #ffffff 72%);
+            border-left-color: #93c5fd;
+        }
+        .cp-job-card.tier-green {
+            background: linear-gradient(180deg, #ecfdf5 0%, #ffffff 72%);
+            border-left-color: var(--cp-green-border);
+        }
+        .cp-job-card.tier-white {
+            border-left-color: var(--cp-border);
+        }
+        .cp-card-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 0.9rem;
+        }
+        .cp-card-main {
+            min-width: 0;
+            flex: 1 1 auto;
+        }
+        .cp-card-title {
+            color: var(--cp-text);
+            font-size: 1rem;
+            line-height: 1.35;
+            font-weight: 760;
+            overflow-wrap: anywhere;
+        }
+        .cp-card-company {
+            margin-top: 0.18rem;
+            color: var(--cp-muted);
+            font-size: 0.84rem;
+            line-height: 1.45;
+        }
+        .cp-card-meta,
+        .cp-card-welfare {
+            color: var(--cp-text);
+            font-size: 0.84rem;
+            line-height: 1.6;
+            margin-top: 0.55rem;
+        }
+        .cp-card-welfare {
+            color: var(--cp-muted);
+        }
+        .cp-card-score {
+            min-width: 5.6rem;
+            border: 1px solid var(--cp-border);
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.78);
+            padding: 0.36rem 0.5rem;
+            text-align: center;
+        }
+        .cp-card-score span {
+            display: block;
+            color: var(--cp-muted);
+            font-size: 0.72rem;
+            font-weight: 700;
+            line-height: 1.2;
+        }
+        .cp-card-score strong {
+            display: block;
+            color: var(--cp-text);
+            font-size: 1.05rem;
+            line-height: 1.35;
+        }
+        .cp-card-detail {
+            border-top: 1px solid var(--cp-border);
+            margin-top: 0.75rem;
+            padding-top: 0.75rem;
+        }
+        .cp-card-detail-row {
+            display: grid;
+            grid-template-columns: 6.5rem minmax(0, 1fr);
+            gap: 0.75rem;
+            margin: 0.45rem 0;
+        }
+        .cp-card-detail-row span {
+            color: var(--cp-muted);
+            font-size: 0.78rem;
+            line-height: 1.55;
+        }
+        .cp-card-detail-row p {
+            margin: 0;
+            color: var(--cp-text);
+            font-size: 0.84rem;
+            line-height: 1.6;
+        }
+        .cp-card-link {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 2.2rem;
+            margin-top: 0.6rem;
+            padding: 0 0.75rem;
+            border: 1px solid var(--cp-border);
+            border-radius: 8px;
+            color: var(--cp-blue);
+            font-weight: 700;
+            text-decoration: none;
+            background: var(--cp-surface);
+        }
         @media (max-width: 900px) {
             .cp-header {
                 display: block;
@@ -535,6 +1167,17 @@ def inject_design_system():
             .cp-stepper {
                 grid-template-columns: repeat(2, minmax(0, 1fr));
             }
+            .cp-card-head,
+            .cp-card-detail-row {
+                display: block;
+            }
+            .cp-card-score {
+                margin-top: 0.6rem;
+                text-align: left;
+            }
+            .cp-job-table {
+                min-width: 760px;
+            }
         }
         </style>
         """,
@@ -544,6 +1187,12 @@ def inject_design_system():
 
 def level_class(level: str) -> str:
     mapping = {
+        "王牌机会": "gold",
+        "强烈推荐": "orange",
+        "优先关注": "purple",
+        "可以投递": "blue",
+        "备选岗位": "green",
+        "普通岗位": "white",
         "强推": "strong",
         "可投": "ok",
         "谨慎": "warn",
@@ -552,17 +1201,21 @@ def level_class(level: str) -> str:
     return mapping.get(level, "")
 
 
-def count_decision_levels(jobs: list[dict]) -> dict[str, int]:
-    counts = {"强推": 0, "可投": 0, "谨慎": 0, "不建议": 0}
+def recommendation_level_options() -> list[str]:
+    return [str(tier["level"]) for tier in RECOMMENDATION_TIERS]
+
+
+def count_recommendation_levels(jobs: list[dict]) -> dict[str, int]:
+    counts = {level: 0 for level in recommendation_level_options()}
     for job in jobs:
-        level = job.get("job_decision", {}).get("level")
+        level = recommendation_view(job)["level"]
         if level in counts:
             counts[level] += 1
     return counts
 
 
 def dict_to_rows(payload: dict) -> list[dict]:
-    return [{"项目": key, "数量": value} for key, value in (payload or {}).items()]
+    return [{"项目": platform_label(key), "数量": value} for key, value in (payload or {}).items()]
 
 
 def render_header(cfg: dict):
@@ -608,7 +1261,7 @@ def main():
 
     uploaded = None
     resume_text = ""
-    criteria = {"job_types": ["社招"]}
+    criteria = {"job_types": ["社招", "校招"], "max_salary_k": 20, "max_experience_years": 1}
 
     left_col, center_col, right_col = st.columns([0.95, 2.7, 1.05], gap="large")
 
@@ -641,12 +1294,14 @@ def main():
                     unsafe_allow_html=True,
                 )
 
-            default_goal = "帮我找上海 AI Agent 社招，薪资 20K 以上，3 年以内，双休优先，不要实习不要校招。"
+            default_goal = DEFAULT_AGENT_GOAL
+            if st.session_state.get("agent_goal") == OLD_DEFAULT_AGENT_GOAL:
+                st.session_state["agent_goal"] = default_goal
             agent_goal = st.text_area(
                 "求职目标",
                 value=st.session_state.get("agent_goal", default_goal),
                 height=104,
-                help="例如：帮我找上海 AI Agent 社招，薪资 20K 以上，3 年以内，双休优先，不要外包。",
+                help="例如：帮我找上海 AI Agent 岗位，我是去年毕业的，薪资 20K 以内，社招和校招都可以，双休优先，不要实习。",
             )
             run_agent = st.button("启动 Agent 检索", type="primary", width="stretch")
             st.caption("Agent 默认不会打开浏览器，也不会打开 Boss 登录页。")
@@ -667,8 +1322,8 @@ def main():
             job_types = st.multiselect(
                 "岗位类型",
                 ["社招", "校招", "实习"],
-                default=["社招"],
-                help="默认只看社招/全职。需要校招或实习时再手动勾选。",
+                default=["社招", "校招"],
+                help="默认看社招和校招，排除实习。",
             )
             allow_browser_login = st.checkbox(
                 "允许打开 Boss 登录浏览器",
@@ -676,23 +1331,27 @@ def main():
                 key="allow_boss_browser_login_v2",
                 help="默认关闭。只有勾选后，Boss DrissionPage 才可以打开浏览器并提示扫码登录。",
             )
-            platform_options = ["nowcoder", "liepin", "zhilian", "51job", "boss", "curated"]
+            platform_options = [
+                code for code in PLATFORM_ORDER
+                if code in PLATFORM_LABELS and code not in {"boss_drission", "boss_cookie"}
+            ]
             if allow_browser_login:
-                platform_options.insert(5, "boss_drission")
+                platform_options.insert(1, "boss_drission")
             platforms = st.multiselect(
-                "平台",
+                "招聘平台",
                 platform_options,
-                default=["zhilian", "51job", "liepin"],
+                default=list(DEFAULT_PLATFORM_CODES),
                 key="platforms_safe_v2",
-                help="默认不选择 Boss 登录浏览器。Boss 普通模式只尝试无浏览器方式，拿不到时使用兜底数据。",
+                format_func=platform_label,
+                help="默认只选 BOSS直聘、智联招聘、前程无忧。其他平台可手动勾选；不会默认打开登录浏览器。",
             )
             if not allow_browser_login and "boss_drission" in platforms:
                 platforms = [p for p in platforms if p != "boss_drission"]
-                st.warning("已忽略 boss_drission：未勾选“允许打开 Boss 登录浏览器”。")
+                st.warning("已忽略 BOSS直聘（登录浏览器）：未勾选“允许打开 Boss 登录浏览器”。")
 
             with st.expander("高级采集与过滤", expanded=False):
                 use_browser_crawlers = st.checkbox(
-                    "启用浏览器列表采集（51job/猎聘）",
+                    "启用浏览器列表采集（前程无忧/猎聘）",
                     value=False,
                     key="use_browser_crawlers_v2",
                     help="默认关闭，避免自动启动 Edge/Chrome。",
@@ -701,8 +1360,8 @@ def main():
                 max_keywords = st.number_input("最多扩展关键词数", min_value=1, max_value=8, value=4)
                 enrich_details = st.checkbox("二次抓取详情页", value=True)
                 detail_limit = st.number_input("详情抓取上限", min_value=0, max_value=100, value=20)
-                min_salary_k, max_salary_k = st.slider("月薪范围（K）", 0, 100, (0, 80))
-                max_experience_years = st.slider("最高经验要求（年）", 0, 10, 10)
+                min_salary_k, max_salary_k = st.slider("月薪范围（K）", 0, 100, (0, 20))
+                max_experience_years = st.slider("最高经验要求（年）", 0, 10, 1)
                 degrees = st.multiselect(
                     "最高可接受学历要求",
                     ["不限", "大专", "本科", "硕士", "博士"],
@@ -795,7 +1454,7 @@ def main():
         st.session_state["agent_search_signature"] = json.dumps(plan, ensure_ascii=False, sort_keys=True)
         st.session_state["last_search_label"] = (
             f"{plan.get('location', '')} / {plan.get('keyword', '')} / "
-            f"平台:{', '.join(plan.get('platforms', []))} / "
+            f"平台:{platform_label_text(plan.get('platforms', []))} / "
             f"页数:{int(plan.get('max_pages') or 1)} / "
             f"类型:{', '.join(plan.get('job_types', []))}"
         )
@@ -809,7 +1468,22 @@ def main():
     agent_result = st.session_state.get("agent_result")
     db_jobs = load_jobs()
     current_jobs = st.session_state.get("current_jobs")
-    jobs = current_jobs if current_jobs is not None else filter_jobs(db_jobs, criteria)
+    if current_jobs is not None:
+        jobs = prepare_jobs_for_display(
+            current_jobs,
+            selected_platforms=platforms,
+            location=location,
+            criteria=criteria,
+            already_filtered=True,
+        )
+    else:
+        jobs = prepare_jobs_for_display(
+            db_jobs,
+            selected_platforms=platforms,
+            location=location,
+            criteria=criteria,
+            already_filtered=False,
+        )
 
     with center_col:
         render_stepper(
@@ -865,12 +1539,12 @@ def main():
             )
 
         if has_resume and jobs and any(job.get("job_decision") for job in jobs):
-            level_counts = count_decision_levels(jobs)
+            level_counts = count_recommendation_levels(jobs)
             st.caption(
                 "推荐分布："
                 + " / ".join(f"{level} {count}" for level, count in level_counts.items())
             )
-            level_options = ["强推", "可投", "谨慎", "不建议"]
+            level_options = recommendation_level_options()
             selected_levels = st.multiselect(
                 "按 Agent 推荐等级过滤",
                 level_options,
@@ -879,7 +1553,7 @@ def main():
             )
             jobs = [
                 job for job in jobs
-                if job.get("job_decision", {}).get("level", "可投") in set(selected_levels)
+                if recommendation_view(job)["level"] in set(selected_levels)
             ]
 
         if jobs:
@@ -902,14 +1576,7 @@ def main():
             if result_view == "卡片":
                 render_job_cards(jobs, limit=int(card_limit), show_recommendation=has_resume)
             else:
-                st.dataframe(
-                    search_jobs_to_frame(jobs[:int(card_limit)], show_recommendation=has_resume),
-                    width="stretch",
-                    height=560,
-                    hide_index=True,
-                    row_height=42,
-                    column_config=job_table_column_config(has_resume),
-                )
+                render_job_table(jobs, int(card_limit), show_recommendation=has_resume)
         else:
             st.warning("当前条件下没有岗位结果。可以放宽平台、页数、薪资、经验、学历或双休筛选后重新采集。")
 

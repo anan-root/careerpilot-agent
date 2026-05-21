@@ -18,6 +18,7 @@ from memory.store import (
     save_agent_run_report,
     save_search_history,
 )
+from platform_registry import platform_label, platform_label_text
 
 
 def run_agent_search(goal_text: str, resume_text: str | None = None) -> dict:
@@ -40,7 +41,7 @@ def run_agent_search(goal_text: str, resume_text: str | None = None) -> dict:
         add_agent_run_step(
             run_id,
             "制定搜索计划",
-            detail=f"{plan.get('location', '上海')} / {plan.get('keyword', '')} / {', '.join(plan.get('platforms') or [])}",
+            detail=f"{plan.get('location', '上海')} / {plan.get('keyword', '')} / {platform_label_text(plan.get('platforms'))}",
         )
 
         criteria = dict(plan.get("criteria") or {})
@@ -98,7 +99,7 @@ def run_agent_search(goal_text: str, resume_text: str | None = None) -> dict:
 def build_agent_message(plan: dict, summary: dict, jobs: list[dict], *, has_resume: bool = False) -> str:
     """Create a concise Chinese explanation for the completed search."""
     keywords = ", ".join(summary.get("search_keywords") or plan.get("expanded_keywords") or [])
-    platforms = "、".join(plan.get("platforms") or [])
+    platforms = platform_label_text(plan.get("platforms"))
     raw_total = summary.get("search_raw_total", len(jobs))
     final_total = summary.get("search_final_total", len(jobs))
     type_counts = summary.get("search_type_counts", {})
@@ -113,7 +114,8 @@ def build_agent_message(plan: dict, summary: dict, jobs: list[dict], *, has_resu
     ]
 
     if final_counts:
-        parts.append(f"最终平台分布：{final_counts}。")
+        readable_counts = {platform_label(key): value for key, value in final_counts.items()}
+        parts.append(f"最终平台分布：{readable_counts}。")
     if type_counts:
         parts.append(f"原始岗位类型分布：{type_counts}。")
     if field_counts:
@@ -140,7 +142,7 @@ def build_agent_message(plan: dict, summary: dict, jobs: list[dict], *, has_resu
 def build_next_actions(jobs: list[dict], *, has_resume: bool = False) -> list[str]:
     if not jobs:
         return [
-            "放宽筛选条件后重新检索，例如先取消双休优先或降低薪资下限。",
+            "放宽筛选条件后重新检索，例如先取消双休优先或放宽薪资范围。",
             "增加关键词数量，尝试“大模型应用 / RAG / LLM / AI应用开发”。",
             "如需 Boss 真实数据，手动开启 Boss 登录浏览器授权。",
         ]

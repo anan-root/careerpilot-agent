@@ -42,6 +42,55 @@ CITY_IDS = {
     "南京": "485",
 }
 
+COMPANY_SIZE_RE = re.compile(r"(?:少于)?\d+\s*-\s*\d+\s*人|\d+\s*人以上|10000人以上")
+SALARY_RE = re.compile(
+    r"(?:\d+(?:\.\d+)?\s*[-~]\s*\d+(?:\.\d+)?\s*[kK](?:·\d+薪)?)|"
+    r"(?:\d+(?:\.\d+)?\s*[kK](?:·\d+薪)?)|"
+    r"(?:\d+\s*-\s*\d+\s*元/天)|"
+    r"(?:薪资面议)",
+    re.IGNORECASE,
+)
+EXPERIENCE_RE = re.compile(r"(?:经验不限|不限经验|无需经验|应届生|\d+\s*-\s*\d+\s*年|\d+\s*年以上?|\d+\s*年以内?)")
+DEGREE_RE = re.compile(r"(博士|硕士|本科|大专|学历不限|不限)")
+CITY_NAMES = ("上海", "北京", "杭州", "深圳", "广州", "成都", "南京", "武汉", "苏州", "西安", "重庆", "天津")
+COMPANY_INDUSTRY_TOKENS = (
+    "企业服务",
+    "互联网",
+    "人工智能",
+    "智能硬件",
+    "医疗健康",
+    "金融",
+    "基金",
+    "证券",
+    "咨询",
+    "软件",
+    "电子商务",
+    "游戏",
+    "广告营销",
+    "数据服务",
+    "大数据",
+    "云计算",
+    "通信",
+    "汽车",
+    "新能源",
+    "机器人",
+    "教育",
+)
+COMPANY_NAME_INDUSTRY_RULES = (
+    (("私募", "基金", "证券", "期货", "资管", "资产管理", "投资"), "金融/基金"),
+    (("人工智能", "智能科技", "AI", "Ai", "ai"), "人工智能"),
+    (("人才", "人力资源", "猎头", "招聘"), "人力资源"),
+    (("管理咨询", "咨询"), "咨询服务"),
+    (("教育", "培训", "学校", "大学"), "教育"),
+    (("医疗", "医药", "健康", "生物"), "医疗健康"),
+    (("软件", "网络科技", "信息科技", "互联网"), "互联网/软件"),
+    (("通信", "通讯"), "通信"),
+    (("汽车", "新能源"), "汽车/新能源"),
+    (("机器人",), "机器人"),
+)
+NOISE_TOKENS = ("未知", "暂无", "综合")
+TITLE_NOISE_TOKENS = ("直达官网投后必反馈", "绑定官网账号并投递", "官网闪投")
+
 
 def search_nowcoder(
     keyword: str = "AI Agent",
@@ -132,6 +181,9 @@ def _parse_search_html(html: str, keyword: str, city: str) -> list[dict]:
         tag_texts = [t.get_text(strip=True) for t in tags]
         detail_text = " ".join([card.get_text(" ", strip=True), desc, *tag_texts])
 
+        company, company_size, company_industry = _clean_company_text(company)
+        title = _clean_title_text(title, salary)
+
         if not title or not company:
             continue
 
@@ -151,6 +203,8 @@ def _parse_search_html(html: str, keyword: str, city: str) -> list[dict]:
             "degree": _extract_degree(detail_text),
             "experience": _extract_experience(detail_text),
             "welfare": " ".join(tag_texts),
+            "company_size": company_size,
+            "company_industry": company_industry,
             "company_address": location,
             "source_url": href,
         }
@@ -270,6 +324,54 @@ def _guess_job_type(title: str, tags: list[str], description: str = "") -> str:
     if any(token in text for token in ("校招", "应届", "2026届", "2027届", "毕业生")):
         return "校招"
     return "社招"
+
+
+def _compact_text(text: str) -> str:
+    return " ".join(str(text or "").replace("\r", " ").replace("\n", " ").split()).strip()
+
+
+def _clean_company_text(value: str) -> tuple[str, str, str]:
+    text = _compact_text(value)
+    size_match = COMPANY_SIZE_RE.search(text)
+    size = size_match.group(0).replace(" ", "") if size_match else ""
+    text = COMPANY_SIZE_RE.sub("", text)
+    for token in NOISE_TOKENS:
+        text = text.replace(token, "")
+    text = _compact_text(text)
+
+    industry = ""
+    for token in sorted(COMPANY_INDUSTRY_TOKENS, key=len, reverse=True):
+        if text.endswith(token):
+            industry = token
+            text = text[: -len(token)].strip()
+            break
+
+    for keywords, inferred_industry in COMPANY_NAME_INDUSTRY_RULES:
+        if any(keyword in text for keyword in keywords):
+            industry = inferred_industry
+            break
+
+    return text.strip(" -｜|·，,"), size, industry
+
+
+def _clean_title_text(value: str, salary: str = "") -> str:
+    text = _compact_text(value)
+    text = re.sub(r"^(社招|校招|实习|日常实习|暑期实习|全职)\s*[|｜·\-]\s*", "", text)
+    if salary and salary in text:
+        text = text[: text.find(salary)]
+    else:
+        salary_match = SALARY_RE.search(text)
+        if salary_match:
+            text = text[: salary_match.start()]
+
+    for token in TITLE_NOISE_TOKENS:
+        text = text.replace(token, "")
+    text = re.sub(rf"({'|'.join(CITY_NAMES)})(?=(?:{EXPERIENCE_RE.pattern}|{DEGREE_RE.pattern}))", "", text)
+    text = EXPERIENCE_RE.sub("", text)
+    text = DEGREE_RE.sub("", text)
+    text = _compact_text(text)
+    text = re.sub(r"(.{2,12}?工程师)工程师$", r"\1", text)
+    return text.strip(" -｜|·，,")
 
 
 def _extract_degree(text: str) -> str:
