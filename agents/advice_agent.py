@@ -7,6 +7,7 @@ def build_local_job_advice(job: dict, profile: dict | None = None) -> str:
     """Generate concise local advice without an LLM call."""
     profile = profile or {}
     decision = job.get("job_decision") or {}
+    ai_match = job.get("ai_match") or (job.get("resume_match") or {}).get("ai") or {}
 
     lines = [
         f"## {job.get('company', '')} - {job.get('title', '')}",
@@ -15,19 +16,24 @@ def build_local_job_advice(job: dict, profile: dict | None = None) -> str:
         "",
         "### 为什么可以考虑",
     ]
-    reasons = decision.get("matched_reasons") or ["岗位进入候选列表，但还需要结合简历进一步判断。"]
+    reasons = ai_match.get("matched_evidence") or decision.get("matched_reasons") or ["岗位进入候选列表，但还需要结合简历进一步判断。"]
     lines.extend(f"- {item}" for item in reasons)
 
-    risks = decision.get("risks") or []
+    missing = ai_match.get("missing_requirements") or decision.get("missing_requirements") or []
+    if missing:
+        lines.extend(["", "### 缺失能力"])
+        lines.extend(f"- {item}" for item in missing)
+
+    risks = ai_match.get("risk_points") or ai_match.get("risks") or decision.get("risks") or []
     lines.extend(["", "### 风险和不确定项"])
     lines.extend(f"- {item}" for item in (risks or ["暂无明显风险；仍建议人工确认公司、岗位真实性和工作制。"]))
 
     lines.extend(["", "### 简历优化动作"])
-    resume_actions = decision.get("resume_actions") or _fallback_resume_actions(job, profile)
+    resume_actions = ai_match.get("resume_actions") or decision.get("resume_actions") or _fallback_resume_actions(job, profile)
     lines.extend(f"- {item}" for item in resume_actions)
 
     lines.extend(["", "### 面试准备重点"])
-    interview_focus = decision.get("interview_focus") or _fallback_interview_focus(job)
+    interview_focus = ai_match.get("interview_focus") or decision.get("interview_focus") or _fallback_interview_focus(job)
     lines.extend(f"- {item}" for item in interview_focus)
 
     lines.extend(["", "### 打招呼语草稿"])

@@ -13,8 +13,10 @@ import time
 import json
 import random
 import logging
+import re
 from pathlib import Path
 from urllib.parse import quote
+from typing import Callable
 
 from crawlers.browser_utils import apply_browser_hardening
 
@@ -43,6 +45,10 @@ LOGGED_IN_SELECTORS = (
     "css:.user-nav .figure",
     "css:[class*='nav-info']",
     "css:[class*='user-info']",
+    "css:[class*='user-nav']",
+    "css:[class*='geek-nav']",
+    "css:a[href*='/web/geek/chat']",
+    "css:a[href*='/web/geek/recommend']",
 )
 LOGGED_OUT_SELECTORS = (
     "css:[class*='header-login']",
@@ -71,11 +77,20 @@ def _login_state(page) -> str:
     try:
         url = _safe_text(getattr(page, "url", ""))
         title = _safe_text(getattr(page, "title", ""))
-        if any(hint in url for hint in LOGIN_URL_HINTS):
-            return "logged_out"
         if _has_any_ele(page, LOGGED_IN_SELECTORS, timeout=1):
             return "logged_in"
-        if any(hint in title for hint in LOGIN_TEXT_HINTS):
+        text = ""
+        try:
+            text = _safe_text(getattr(page, "html", ""))[:6000]
+        except Exception:
+            text = ""
+        has_login_text = any(hint in title or hint in text for hint in LOGIN_TEXT_HINTS)
+        has_job_signal = any(token in text for token in ("职位", "薪资", "经验", "学历", "立即沟通", "BOSS直聘"))
+        if has_job_signal and not has_login_text:
+            return "logged_in"
+        if any(hint in url for hint in LOGIN_URL_HINTS):
+            return "logged_out"
+        if has_login_text:
             return "logged_out"
         if _has_any_ele(page, LOGGED_OUT_SELECTORS, timeout=1):
             return "logged_out"
@@ -101,11 +116,19 @@ def _ensure_login(page, *, login_timeout: int = 120) -> bool:
         logger.info("Boss DrissionPage: already logged in")
         return True
 
+    state = _login_state(page)
+    if state == "unknown":
+        logger.info("Boss DrissionPage: login state unknown after job page load; continue with API probe")
+        return True
+
     # If the page is still settling, give it one more chance before forcing login.
     for _ in range(2):
         time.sleep(2)
         if _check_login(page):
             logger.info("Boss DrissionPage: login confirmed after refresh wait")
+            return True
+        if _login_state(page) == "unknown":
+            logger.info("Boss DrissionPage: login state unknown after refresh wait; continue with API probe")
             return True
 
     logger.info("Boss DrissionPage: not logged in, opening login page...")
@@ -122,6 +145,9 @@ def _ensure_login(page, *, login_timeout: int = 120) -> bool:
         time.sleep(2)
         if _check_login(page):
             logger.info("Boss DrissionPage: login detected after %ds", (i + 1) * 2)
+            return True
+        if _login_state(page) == "unknown":
+            logger.info("Boss DrissionPage: login state unknown after %ds; continue with API probe", (i + 1) * 2)
             return True
         if i % 5 == 0 and i > 0:
             print(f"  等待登录... ({(i + 1) * 2}秒)")
@@ -151,12 +177,48 @@ def _read_joblist_packet(page, target: str, *, timeout: int = 20):
     page.listen.start("wapi/zpgeek/search/joblist")
     try:
         page.get(target)
+        time.sleep(1.2)
+        _trigger_search(page)
         return page.listen.wait(timeout=timeout)
     finally:
         try:
             page.listen.stop()
         except Exception:
             pass
+
+
+def _trigger_search(page) -> None:
+    """Boss sometimes fills the query box from URL without firing search."""
+    input_selectors = (
+        "css:input[placeholder*='搜索']",
+        "css:input[placeholder*='职位']",
+        "css:input[class*='search']",
+        "css:.search-input input",
+    )
+    button_selectors = (
+        "css:.search-btn",
+        "css:[class*='search-btn']",
+        "css:button[class*='search']",
+    )
+    for selector in input_selectors:
+        try:
+            ele = page.ele(selector, timeout=0.4)
+            if ele:
+                ele.click()
+                ele.input("\n")
+                time.sleep(0.8)
+                return
+        except Exception:
+            continue
+    for selector in button_selectors:
+        try:
+            ele = page.ele(selector, timeout=0.4)
+            if ele:
+                ele.click()
+                time.sleep(0.8)
+                return
+        except Exception:
+            continue
 
 
 def _create_page():
@@ -190,6 +252,7 @@ def _search_keyword_with_page(
     max_pages: int,
     delay_range: tuple[float, float],
     auto_login: bool,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> tuple[list[dict], bool]:
     """Search one keyword in an existing Boss browser page.
 
@@ -206,15 +269,24 @@ def _search_keyword_with_page(
     for pg in range(1, max_pages + 1):
         target = url if pg == 1 else f"{url}&page={pg}"
         body: dict | None = None
+        _emit_progress(progress_callback, f"Boss / {keyword} 正在监听第 {pg}/{max_pages} 页岗位接口")
 
         for attempt in range(2):
-            packet = _read_joblist_packet(page, target, timeout=20)
+            packet = _read_joblist_packet(page, target, timeout=12)
 
             if not packet or not getattr(packet, "response", None) or not packet.response.body:
                 logger.warning("Page %d: no API response captured (attempt %d)", pg, attempt + 1)
+                _emit_progress(progress_callback, f"Boss / {keyword} 第 {pg} 页未监听到岗位接口响应，正在判断登录态")
+                dom_jobs = _parse_rendered_jobs(page, keyword, city, pg)
+                if dom_jobs:
+                    all_jobs.extend(dom_jobs)
+                    _emit_progress(progress_callback, f"Boss / {keyword} 第 {pg} 页已从页面读取 {len(dom_jobs)} 个岗位")
+                    body = {"code": 0, "zpData": {"jobList": [], "hasMore": False}, "_dom_fallback": True}
+                    break
                 state = _login_state(page)
                 if attempt == 0 and auto_login and state == "logged_out":
                     logger.warning("Page %d: login state is logged_out, retrying after re-auth", pg)
+                    _emit_progress(progress_callback, "Boss 登录态失效或需要验证，请在弹窗中处理；本次最多等待 45 秒")
                     if not _ensure_login(page, login_timeout=45):
                         keep_browser_open = True
                         break
@@ -237,6 +309,7 @@ def _search_keyword_with_page(
                 logger.warning(
                     "Page %d: login/session issue detected, retrying after manual re-auth", pg
                 )
+                _emit_progress(progress_callback, "Boss 返回登录/验证提示，请在弹窗中处理；本次最多等待 45 秒")
                 if not _ensure_login(page, login_timeout=45):
                     keep_browser_open = True
                     break
@@ -246,8 +319,12 @@ def _search_keyword_with_page(
         if not body:
             break
 
+        if body.get("_dom_fallback"):
+            break
+
         if body.get("code") != 0:
             logger.warning("Page %d: API error code %s", pg, body.get("code"))
+            _emit_progress(progress_callback, f"Boss / {keyword} 第 {pg} 页接口返回异常：{body.get('code')}")
             if _response_suggests_login_issue(body):
                 logger.warning(
                     "Page %d: Boss login/session may have expired; browser kept open for recovery.",
@@ -258,6 +335,7 @@ def _search_keyword_with_page(
 
         job_list = body.get("zpData", {}).get("jobList", [])
         if not job_list:
+            _emit_progress(progress_callback, f"Boss / {keyword} 第 {pg} 页没有岗位，停止该关键词")
             break
 
         for j in job_list:
@@ -295,6 +373,7 @@ def _search_keyword_with_page(
             all_jobs.append(job)
 
         logger.info("DrissionPage Boss: keyword '%s' page %d got %d jobs", keyword, pg, len(job_list))
+        _emit_progress(progress_callback, f"Boss / {keyword} 第 {pg} 页获取 {len(job_list)} 个岗位")
 
         if not body.get("zpData", {}).get("hasMore", False):
             break
@@ -312,6 +391,7 @@ def search_boss_drission_batch(
     max_pages: int = 3,
     delay_range: tuple[float, float] = (3.0, 6.0),
     auto_login: bool = False,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> dict[str, list[dict]]:
     """Search multiple Boss keywords in one browser session."""
     normalized_keywords: list[str] = []
@@ -331,10 +411,12 @@ def search_boss_drission_batch(
 
     try:
         if auto_login:
+            _emit_progress(progress_callback, "Boss 正在确认登录态")
             if not _ensure_login(page):
                 logger.warning(
                     "Boss DrissionPage: login not confirmed, browser left open for manual login."
                 )
+                _emit_progress(progress_callback, "Boss 明确要求登录或验证，已保留浏览器窗口，请处理后重新检索")
                 should_quit = False
                 return results
         else:
@@ -348,6 +430,7 @@ def search_boss_drission_batch(
                 return results
 
         for index, keyword in enumerate(normalized_keywords):
+            _emit_progress(progress_callback, f"Boss 开始关键词：{keyword}（{index + 1}/{len(normalized_keywords)}）")
             jobs, keep_open = _search_keyword_with_page(
                 page,
                 keyword,
@@ -355,6 +438,7 @@ def search_boss_drission_batch(
                 max_pages=max_pages,
                 delay_range=delay_range,
                 auto_login=auto_login,
+                progress_callback=progress_callback,
             )
             results[keyword] = jobs
             if keep_open:
@@ -383,6 +467,7 @@ def search_boss_drission(
     max_pages: int = 3,
     delay_range: tuple[float, float] = (3.0, 6.0),
     auto_login: bool = False,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> list[dict]:
     """Search Boss直聘 by intercepting API responses in a real browser.
 
@@ -399,10 +484,107 @@ def search_boss_drission(
         max_pages=max_pages,
         delay_range=delay_range,
         auto_login=auto_login,
+        progress_callback=progress_callback,
     )
     all_jobs = results.get(str(keyword or "").strip() or "AI Agent", [])
     logger.info("DrissionPage Boss: total %d jobs for '%s' in %s", len(all_jobs), keyword, city)
     return all_jobs
+
+
+def _emit_progress(callback: Callable[[str], None] | None, message: str) -> None:
+    if callback is None:
+        return
+    try:
+        callback(message)
+    except Exception:
+        logger.debug("Progress callback failed", exc_info=True)
+
+
+def _parse_rendered_jobs(page, keyword: str, city: str, page_num: int) -> list[dict]:
+    """Fallback parser for jobs already visible in the Boss page."""
+    cards = []
+    for selector in (
+        "css:.job-card-wrapper",
+        "css:.job-card-box",
+        "css:.job-list-box li",
+        "css:[class*='job-card']",
+    ):
+        try:
+            cards = page.eles(selector, timeout=1) or []
+        except Exception:
+            cards = []
+        if cards:
+            break
+
+    jobs: list[dict] = []
+    seen: set[str] = set()
+    for idx, card in enumerate(cards):
+        text = _safe_text(getattr(card, "text", ""))
+        if not text or not any(token in text for token in ("K", "元/天", "薪资面议")):
+            continue
+        lines = [line.strip() for line in re.split(r"[\r\n]+", text) if line.strip()]
+        title = lines[0] if lines else ""
+        salary = _first_regex(text, r"\d+\s*-\s*\d+\s*[Kk](?:·\d+薪)?|\d+\s*[Kk](?:·\d+薪)?|\d+\s*-\s*\d+\s*元/天|薪资面议")
+        company = _extract_company_from_lines(lines)
+        location = _first_regex(text, r"(上海|北京|深圳|广州|杭州|成都|南京|武汉|苏州|西安|重庆|天津)[^\s\n]{0,12}") or city
+        experience = _first_regex(text, r"经验不限|不限经验|应届生|\d+\s*-\s*\d+\s*年|\d+\s*年以上|\d+\s*年以内|\d+\s*年")
+        degree = _first_regex(text, r"学历不限|不限学历|博士|硕士|本科|大专|中专")
+        if not title or not salary:
+            continue
+        key = f"{company}|{title}|{salary}|{location}"
+        if key in seen:
+            continue
+        seen.add(key)
+        url = ""
+        try:
+            link = card.ele("css:a[href*='job_detail']", timeout=0.2)
+            href = link.attr("href") if link else ""
+            if href:
+                url = href if href.startswith("http") else f"https://www.zhipin.com{href}"
+        except Exception:
+            url = ""
+        jobs.append({
+            "platform": "boss",
+            "job_id": f"boss_dom_{page_num}_{idx}_{abs(hash(key))}",
+            "title": title,
+            "company": company,
+            "location": location,
+            "salary": salary,
+            "job_type": "实习" if "实习" in text else "社招",
+            "description": title,
+            "requirements": _clip_text(text, 1200),
+            "url": url,
+            "posted_date": "",
+            "skills": "",
+            "degree": degree,
+            "experience": experience,
+            "company_size": "",
+            "company_industry": "",
+            "company_stage": "",
+            "welfare": "",
+            "hr_name": "",
+            "hr_title": "",
+            "chat_url": "",
+            "full_jd": _clip_text(text, 1800),
+            "source_url": url,
+        })
+    return jobs
+
+
+def _extract_company_from_lines(lines: list[str]) -> str:
+    for line in lines[1:]:
+        if any(token in line for token in ("公司", "科技", "网络", "管理", "游戏", "企业", "集团", "有限")):
+            return line
+    return ""
+
+
+def _first_regex(text: str, pattern: str) -> str:
+    match = re.search(pattern, text)
+    return match.group(0).strip() if match else ""
+
+
+def _clip_text(text: str, limit: int) -> str:
+    return " ".join(str(text or "").split())[:limit]
 
 
 def fetch_job_detail(job_url: str) -> str:

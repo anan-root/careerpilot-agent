@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import hashlib
 import tempfile
 from pathlib import Path
 from datetime import datetime
@@ -17,6 +18,8 @@ from agents.resume_matcher import (
     SUPPORTED_EXTENSIONS,
     build_match_report,
     extract_resume_text,
+    generate_interview_pack,
+    generate_job_gap_analysis,
     generate_resume_job_advice,
     rank_jobs_for_resume,
 )
@@ -52,7 +55,15 @@ def load_jobs() -> list[dict]:
 
 
 def clear_search_outputs():
-    for key in ("ranked_jobs", "advice", "advice_path"):
+    for key in (
+        "ranked_jobs",
+        "advice",
+        "advice_path",
+        "gap_analysis",
+        "gap_analysis_path",
+        "interview_pack",
+        "interview_pack_path",
+    ):
         st.session_state.pop(key, None)
 
 
@@ -66,6 +77,15 @@ def save_upload(uploaded_file) -> Path:
 
 def jobs_to_frame(jobs: list[dict]) -> pd.DataFrame:
     return search_jobs_to_frame(jobs, show_recommendation=True)
+
+
+def resume_text_hash(text: str) -> str:
+    return hashlib.sha1(str(text or "").strip().encode("utf-8")).hexdigest()[:16]
+
+
+def resume_cache_key(uploaded_file, resume_text: str) -> str:
+    name = getattr(uploaded_file, "name", "resume")
+    return f"{name}:{resume_text_hash(resume_text)}"
 
 
 def reset_result_pagination():
@@ -219,18 +239,26 @@ INSURANCE_TOKENS = (
 )
 
 RECOMMENDATION_TIERS = (
-    {"min": 90, "level": "王牌机会", "class": "gold"},
-    {"min": 80, "level": "强烈推荐", "class": "orange"},
-    {"min": 70, "level": "优先关注", "class": "purple"},
-    {"min": 60, "level": "可以投递", "class": "blue"},
-    {"min": 50, "level": "备选岗位", "class": "green"},
-    {"min": 0, "level": "普通岗位", "class": "white"},
+    {"min": 90, "level": "强推", "class": "gold"},
+    {"min": 80, "level": "推荐", "class": "orange"},
+    {"min": 70, "level": "可投", "class": "purple"},
+    {"min": 60, "level": "谨慎", "class": "blue"},
+    {"min": 50, "level": "备选", "class": "green"},
+    {"min": 0, "level": "不建议", "class": "white"},
 )
 
 LEGACY_LEVEL_SCORES = {
+    "王牌机会": 95,
+    "强烈推荐": 85,
+    "优先关注": 75,
+    "可以投递": 65,
+    "备选岗位": 55,
+    "普通岗位": 45,
     "强推": 85,
+    "推荐": 80,
     "可投": 65,
     "谨慎": 52,
+    "备选": 55,
     "不建议": 35,
 }
 
@@ -433,8 +461,11 @@ def parse_recommendation_score(value) -> float | None:
 def recommendation_view(job: dict) -> dict:
     decision = job.get("job_decision") or {}
     match = job.get("resume_match") or {}
+    ai_match = job.get("ai_match") or match.get("ai") or {}
     legacy_level = clean_display_value(decision.get("level", ""))
     score = parse_recommendation_score(decision.get("score"))
+    if score is None:
+        score = parse_recommendation_score(ai_match.get("score"))
     if score is None:
         score = parse_recommendation_score(match.get("score"))
     if score is None and legacy_level in LEGACY_LEVEL_SCORES:
@@ -444,7 +475,22 @@ def recommendation_view(job: dict) -> dict:
     for tier in RECOMMENDATION_TIERS:
         if score >= tier["min"]:
             return {"level": tier["level"], "score": score, "class": tier["class"]}
-    return {"level": "普通岗位", "score": score, "class": "white"}
+    return {"level": "不建议", "score": score, "class": "white"}
+
+
+def ai_match_view(job: dict) -> dict:
+    match = job.get("ai_match") or (job.get("resume_match") or {}).get("ai") or {}
+    return match if isinstance(match, dict) else {}
+
+
+def list_text(value: object, limit: int = 3) -> str:
+    if not value:
+        return ""
+    if isinstance(value, (list, tuple, set)):
+        items = [clean_display_value(item) for item in value]
+    else:
+        items = [clean_display_value(value)]
+    return "；".join([item for item in items if item][:limit])
 
 
 def build_company_block(job: dict, visible: dict[str, bool]) -> str:
@@ -579,6 +625,7 @@ def render_job_cards(
     visible = visible_job_columns(jobs, show_recommendation=show_recommendation)
     for index, job in enumerate(jobs[:limit], start_index):
         decision = job.get("job_decision", {})
+        ai_match = ai_match_view(job)
         recommendation = recommendation_view(job)
         title = display_job_title(job)
         company = display_company_name(job)
@@ -593,9 +640,11 @@ def render_job_cards(
         degree = clean_display_value(job.get("degree_display") or job.get("degree", ""))
         weekend = extract_weekend_text(job)
         welfare = clean_display_value(job.get("welfare", ""))
-        reasons = decision.get("matched_reasons", [])[:3]
-        risks = decision.get("risks", [])[:3]
-        resume_actions = decision.get("resume_actions", [])[:2]
+        reasons = (ai_match.get("matched_evidence") or decision.get("matched_reasons", []))[:3]
+        risks = (ai_match.get("risk_points") or ai_match.get("risks") or decision.get("risks", []))[:3]
+        missing = (ai_match.get("missing_requirements") or ai_match.get("missing_keywords") or decision.get("missing_requirements", []))[:3]
+        resume_actions = (ai_match.get("resume_actions") or decision.get("resume_actions", []))[:2]
+        interview_focus = (ai_match.get("interview_focus") or decision.get("interview_focus", []))[:3]
         posted_date = clean_display_value(job.get("posted_date", ""))
         requirement_brief = compact_requirements(job)
         url = clean_display_value(job.get("source_url") or job.get("url", ""))
@@ -628,9 +677,11 @@ def render_job_cards(
             ("岗位发布时间", posted_date),
             ("公司信息", company_line),
             ("简略招聘要求", requirement_brief),
-            ("推荐理由", "；".join(reasons) if show_recommendation else ""),
+            ("匹配证据", "；".join(reasons) if show_recommendation else ""),
+            ("缺失能力", "；".join(missing) if show_recommendation else ""),
             ("风险提醒", "；".join(risks) if show_recommendation else ""),
             ("简历动作", "；".join(resume_actions) if show_recommendation else ""),
+            ("面试重点", "；".join(interview_focus) if show_recommendation else ""),
             ("来源平台", platform),
         ):
             if clean_display_value(value):
@@ -687,6 +738,7 @@ def run_search(
     detail_limit=20,
     use_browser_crawlers=False,
     allow_browser_login=False,
+    progress_callback=None,
 ):
     jobs = collect_all_jobs(
         keyword,
@@ -700,6 +752,7 @@ def run_search(
         detail_limit=int(detail_limit),
         use_browser_crawlers=use_browser_crawlers,
         allow_browser_login=allow_browser_login,
+        progress_callback=progress_callback,
     )
     st.session_state["current_jobs"] = jobs
     st.session_state["search_summary"] = get_last_search_summary()
@@ -1204,10 +1257,12 @@ def level_class(level: str) -> str:
         "可以投递": "blue",
         "备选岗位": "green",
         "普通岗位": "white",
-        "强推": "strong",
-        "可投": "ok",
-        "谨慎": "warn",
-        "不建议": "no",
+        "强推": "gold",
+        "推荐": "orange",
+        "可投": "purple",
+        "谨慎": "blue",
+        "备选": "green",
+        "不建议": "white",
     }
     return mapping.get(level, "")
 
@@ -1227,6 +1282,202 @@ def count_recommendation_levels(jobs: list[dict]) -> dict[str, int]:
 
 def dict_to_rows(payload: dict) -> list[dict]:
     return [{"项目": platform_label(key), "数量": value} for key, value in (payload or {}).items()]
+
+
+def field_counts_rows(payload: dict) -> list[dict]:
+    labels = {
+        "experience": "经验要求",
+        "degree": "学历要求",
+        "welfare": "福利/双休",
+        "company_address": "公司地址",
+        "salary": "薪资",
+    }
+    rows = []
+    for key, label in labels.items():
+        counts = (payload or {}).get(key) or {}
+        filled = int(counts.get("filled", 0) or 0)
+        missing = int(counts.get("missing", 0) or 0)
+        total = filled + missing
+        rows.append({
+            "字段": label,
+            "已获取": filled,
+            "总数": total,
+            "完整度": f"{round(filled / total * 100)}%" if total else "-",
+        })
+    return rows
+
+
+def render_agent_trace(agent_result: dict, summary: dict, jobs: list[dict]):
+    plan = agent_result.get("plan", {}) if agent_result else {}
+    run_record = agent_result.get("run_record", {}) if agent_result else {}
+    with st.expander("Agent 执行记录", expanded=True):
+        trace_rows = [
+            {"阶段": "搜索计划", "结果": f"{plan.get('location', '上海')} / {plan.get('keyword', '')} / {platform_label_text(plan.get('platforms', []))}"},
+            {"阶段": "实际关键词", "结果": "，".join(summary.get("search_keywords") or plan.get("expanded_keywords") or [])},
+            {"阶段": "候选数量", "结果": f"原始 {summary.get('search_raw_total', len(jobs))} / 筛选 {summary.get('search_filtered_total', len(jobs))} / 展示 {summary.get('search_final_total', len(jobs))}"},
+            {"阶段": "DeepSeek 精排", "结果": f"请求 {summary.get('llm_rerank_requested', 0)} / 成功 {summary.get('llm_rerank_success', 0)}"},
+            {"阶段": "推荐分布", "结果": json.dumps(summary.get('recommendation_level_counts') or count_recommendation_levels(jobs), ensure_ascii=False)},
+        ]
+        st.dataframe(pd.DataFrame(trace_rows), width="stretch", hide_index=True)
+        steps = run_record.get("steps") or []
+        if steps:
+            st.write("执行步骤")
+            st.dataframe(pd.DataFrame(steps), width="stretch", hide_index=True)
+        field_counts = summary.get("search_field_counts") or {}
+        if field_counts:
+            st.write("字段完整度")
+            st.dataframe(pd.DataFrame(field_counts_rows(field_counts)), width="stretch", hide_index=True)
+        platform_counts = summary.get("search_final_platform_counts") or {}
+        if platform_counts:
+            st.write("最终平台分布")
+            st.dataframe(pd.DataFrame(dict_to_rows(platform_counts)), width="stretch", hide_index=True)
+
+
+def make_status_progress(status):
+    def _progress(message: str):
+        text = clean_display_value(message)
+        if text:
+            status.write(text)
+    return _progress
+
+
+def render_text_list(title: str, items: object, *, empty: str = "暂无", limit: int = 6):
+    st.markdown(f"**{title}**")
+    values = []
+    if isinstance(items, (list, tuple, set)):
+        values = [clean_display_value(item) for item in items]
+    elif items:
+        values = [clean_display_value(items)]
+    values = [item for item in values if item][:limit]
+    if not values:
+        st.caption(empty)
+        return
+    for item in values:
+        st.write(f"- {item}")
+
+
+def render_resume_profile_summary(profile: dict):
+    if not profile:
+        st.caption("简历画像尚未生成。")
+        return
+    role = clean_display_value(profile.get("target_role")) or list_text(profile.get("target_roles"), limit=2)
+    exp = profile.get("experience_years")
+    st.markdown(f"**目标方向：** {role or '暂未判断'}")
+    st.markdown(f"**经验年限：** {exp if exp is not None else '暂未提取'}")
+    render_text_list("核心技能", profile.get("skills"), limit=10)
+    project_names = [
+        project.get("name") or project.get("summary")
+        for project in profile.get("projects", [])
+        if isinstance(project, dict)
+    ]
+    render_text_list("项目证据", project_names, empty="简历中暂未提取到明确项目", limit=5)
+    render_text_list("优势", profile.get("strengths"), limit=5)
+    render_text_list("风险/待补充", profile.get("gaps") or profile.get("risks"), empty="暂无明显风险", limit=5)
+
+
+def render_match_summary(job: dict):
+    recommendation = recommendation_view(job)
+    st.markdown(
+        f'<span class="cp-level {recommendation["class"]}">{recommendation["level"]}</span>'
+        + (f"　**推荐分：** {recommendation['score']:.1f}" if recommendation["score"] is not None else ""),
+        unsafe_allow_html=True,
+    )
+    decision = job.get("job_decision") or {}
+    ai_match = ai_match_view(job)
+    render_text_list("匹配证据", ai_match.get("matched_evidence") or decision.get("matched_reasons"), empty="暂无明确匹配证据")
+    render_text_list("缺失能力", ai_match.get("missing_requirements") or decision.get("missing_requirements"), empty="暂无明显缺口")
+    render_text_list("风险点", ai_match.get("risk_points") or ai_match.get("risks") or decision.get("risks"), empty="暂无明显风险")
+    render_text_list("简历动作", ai_match.get("resume_actions") or decision.get("resume_actions"), empty="暂无建议")
+    render_text_list("面试重点", ai_match.get("interview_focus") or decision.get("interview_focus"), empty="暂无建议")
+
+
+def render_job_detail_summary(job: dict):
+    rows = [
+        ("公司", display_company_name(job)),
+        ("岗位", display_job_title(job)),
+        ("薪资", salary_text(job)),
+        ("经验", display_experience_text(job)),
+        ("学历", clean_display_value(job.get("degree_display") or job.get("degree", ""))),
+        ("福利", trim_display_text(job.get("welfare", ""), limit=220)),
+        ("双休", extract_weekend_text(job)),
+        ("公司地址", clean_display_value(job.get("company_address", ""))),
+        ("工作地点", clean_display_value(job.get("location", ""))),
+        ("发布时间", clean_display_value(job.get("posted_date", ""))),
+        ("来源平台", platform_label(job.get("platform", ""))),
+    ]
+    for label, value in rows:
+        if clean_display_value(value):
+            st.markdown(f"**{label}：** {value}")
+    requirements = compact_requirements(job, limit=800)
+    if requirements:
+        st.markdown("**招聘要求：**")
+        st.write(requirements)
+
+
+def render_agent_plan_summary(plan: dict):
+    criteria = plan.get("criteria") or {}
+    rows = [
+        ("城市", plan.get("location")),
+        ("主关键词", plan.get("keyword")),
+        ("扩展关键词", "、".join(plan.get("expanded_keywords") or [])),
+        ("使用平台", platform_label_text(plan.get("platforms"))),
+        ("页数", plan.get("max_pages")),
+        ("岗位类型", "、".join(plan.get("job_types") or [])),
+        ("薪资", _criteria_salary_text(criteria)),
+        ("经验", _criteria_experience_text(criteria)),
+        ("学历", "、".join(criteria.get("degrees") or [])),
+    ]
+    for label, value in rows:
+        if clean_display_value(value):
+            st.markdown(f"**{label}：** {value}")
+
+
+def _criteria_salary_text(criteria: dict) -> str:
+    if criteria.get("min_salary_k") and criteria.get("max_salary_k"):
+        return f"{criteria.get('min_salary_k')}K-{criteria.get('max_salary_k')}K"
+    if criteria.get("min_salary_k"):
+        return f"{criteria.get('min_salary_k')}K 以上"
+    if criteria.get("max_salary_k"):
+        return f"{criteria.get('max_salary_k')}K 以下"
+    if criteria.get("salary_preferred_max_k") is not None:
+        return f"偏好 {criteria.get('salary_preferred_max_k')}K 以下"
+    return ""
+
+
+def _criteria_experience_text(criteria: dict) -> str:
+    if criteria.get("max_experience_years") is not None:
+        return f"{criteria.get('max_experience_years')} 年以内"
+    if criteria.get("experience_preferred_max_years") is not None:
+        return f"偏好 {criteria.get('experience_preferred_max_years')} 年以内"
+    return ""
+
+
+def auto_rank_jobs_if_needed(resume_text: str, jobs: list[dict], profile: dict, plan: dict | None = None) -> list[dict]:
+    if not resume_text.strip() or not jobs:
+        return []
+    signature = json.dumps(
+        {
+            "resume": resume_text_hash(resume_text),
+            "jobs": [
+                [job.get("platform"), job.get("job_id"), job.get("company"), job.get("title"), job.get("salary")]
+                for job in jobs[:80]
+            ],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    if st.session_state.get("local_match_signature") == signature and st.session_state.get("ranked_jobs"):
+        return st.session_state["ranked_jobs"]
+    if st.session_state.get("deep_match_signature") == signature and st.session_state.get("ranked_jobs"):
+        return st.session_state["ranked_jobs"]
+    ranked = rank_jobs_for_resume(resume_text, jobs, top_n=None, ai_top_n=0)
+    ranked = rank_jobs_with_decisions(ranked, profile, plan or {})
+    st.session_state["ranked_jobs"] = ranked
+    st.session_state["current_jobs"] = ranked
+    st.session_state["active_search_source"] = "matched"
+    st.session_state["local_match_signature"] = signature
+    st.session_state.setdefault("search_summary", {})["recommendation_level_counts"] = count_recommendation_levels(ranked)
+    return ranked
 
 
 def render_header(cfg: dict):
@@ -1298,7 +1549,20 @@ def main():
                 if not resume_text.strip():
                     st.error("没有从简历中解析出文字。请换成文本型 PDF、DOCX 或 TXT。")
                     return
+                current_resume_key = resume_cache_key(uploaded, resume_text)
+                st.session_state["resume_text_hash"] = resume_text_hash(resume_text)
+                st.session_state["resume_cache_key"] = current_resume_key
                 st.success(f"已读取简历：{uploaded.name}，约 {len(resume_text)} 字符")
+                if st.session_state.get("resume_profile_key") != current_resume_key:
+                    with st.status("正在自动解析简历画像...", expanded=False) as status:
+                        profile = build_resume_profile(resume_text)
+                        st.session_state["resume_profile"] = profile
+                        st.session_state["resume_profile_key"] = current_resume_key
+                        status.update(label="简历画像已解析", state="complete")
+                else:
+                    st.caption("已命中简历画像缓存。")
+                with st.expander("简历画像摘要", expanded=True):
+                    render_resume_profile_summary(st.session_state.get("resume_profile", {}))
             else:
                 st.markdown(
                     '<div class="cp-muted">可以先不上传简历直接检索；上传后推荐会更准。</div>',
@@ -1431,7 +1695,7 @@ def main():
             manual_search = st.button("按筛选重新检索", width="stretch")
 
             if auto_search and (signature_changed or "current_jobs" not in st.session_state):
-                with st.spinner("正在按当前筛选检索..."):
+                with st.status("正在按当前筛选检索...", expanded=True) as status:
                     jobs_found = run_search(
                         keyword,
                         location,
@@ -1445,11 +1709,13 @@ def main():
                         detail_limit=detail_limit,
                         use_browser_crawlers=use_browser_crawlers,
                         allow_browser_login=allow_browser_login,
+                        progress_callback=make_status_progress(status),
                     )
+                    status.update(label=f"检索完成，本次结果 {len(jobs_found)} 个", state="complete")
                 st.success(f"已刷新，本次结果 {len(jobs_found)} 个")
 
             if manual_search:
-                with st.spinner("正在按当前筛选检索..."):
+                with st.status("正在按当前筛选检索...", expanded=True) as status:
                     jobs_found = run_search(
                         keyword,
                         location,
@@ -1463,17 +1729,21 @@ def main():
                         detail_limit=detail_limit,
                         use_browser_crawlers=use_browser_crawlers,
                         allow_browser_login=allow_browser_login,
+                        progress_callback=make_status_progress(status),
                     )
+                    status.update(label=f"检索完成，本次结果 {len(jobs_found)} 个", state="complete")
                 st.success(f"检索完成，本次结果 {len(jobs_found)} 个")
 
     if run_agent:
         st.session_state["agent_goal"] = agent_goal
-        with st.spinner("Agent 正在制定搜索计划并检索岗位..."):
+        with st.status("Agent 正在制定搜索计划并检索岗位...", expanded=True) as status:
             result = run_agent_search(
                 agent_goal,
                 resume_text or None,
                 allow_browser_login=allow_browser_login,
+                progress_callback=make_status_progress(status),
             )
+            status.update(label=f"Agent 检索完成，本次结果 {len(result.get('jobs', []))} 个", state="complete")
         st.session_state["agent_result"] = result
         st.session_state["current_jobs"] = result.get("jobs", [])
         st.session_state["search_summary"] = result.get("summary", {})
@@ -1514,6 +1784,16 @@ def main():
             criteria=criteria,
             already_filtered=False,
         )
+
+    if resume_text.strip() and jobs:
+        profile_for_match = st.session_state.get("resume_profile") or {}
+        if profile_for_match:
+            jobs = auto_rank_jobs_if_needed(
+                resume_text,
+                jobs,
+                profile_for_match,
+                (agent_result or {}).get("plan", {}),
+            )
 
     with center_col:
         render_stepper(
@@ -1674,17 +1954,46 @@ def main():
                 with col_a:
                     top_n = st.number_input("展示 Top N", min_value=1, max_value=100, value=20)
                 with col_b:
-                    ai_top_n = st.number_input("DeepSeek 精评前 N 个", min_value=0, max_value=20, value=0, help="0 表示只做本地快速匹配。")
+                    ai_top_n = st.selectbox(
+                        "DeepSeek 精排数量",
+                        [0, 3, 5, 10],
+                        index=1,
+                        help="默认只精排本地 Top 3，0 表示只做本地快速匹配。",
+                    )
 
                 if not jobs:
                     st.warning("还没有岗位。请先检索岗位。")
-                elif st.button("开始匹配", type="primary", width="stretch"):
-                    with st.spinner("正在匹配岗位..."):
-                        ranked = rank_jobs_for_resume(resume_text, jobs, top_n=int(top_n), ai_top_n=int(ai_top_n))
+                else:
+                    matched_with_ai = sum(1 for job in jobs if isinstance(ai_match_view(job).get("score"), (int, float)))
+                    if matched_with_ai:
+                        st.success(f"已完成本地快速匹配，并有 {matched_with_ai} 个岗位命中 DeepSeek 精排缓存/结果。")
+                    else:
+                        st.info("已根据简历完成本地快速匹配；需要更准时，再对排名靠前岗位做 DeepSeek 精排。")
+
+                if jobs and st.button("DeepSeek 精排当前结果", type="primary", width="stretch"):
+                    with st.status("正在精排当前岗位...", expanded=True) as status:
+                        status.write(f"本地匹配已完成，准备精排 Top {int(ai_top_n)}")
+                        ranked = rank_jobs_for_resume(
+                            resume_text,
+                            jobs,
+                            top_n=int(top_n),
+                            ai_top_n=int(ai_top_n),
+                            progress_callback=make_status_progress(status),
+                            resume_cache_key=st.session_state.get("resume_text_hash"),
+                        )
                         profile = st.session_state.get("resume_profile") or build_resume_profile(resume_text)
                         ranked = rank_jobs_with_decisions(ranked, profile, (agent_result or {}).get("plan", {}))
                         st.session_state["resume_profile"] = profile
                         st.session_state["ranked_jobs"] = ranked
+                        st.session_state["current_jobs"] = ranked
+                        st.session_state["active_search_source"] = "matched"
+                        st.session_state["deep_match_signature"] = st.session_state.get("local_match_signature")
+                        st.session_state.setdefault("search_summary", {})["llm_rerank_requested"] = int(ai_top_n)
+                        st.session_state.setdefault("search_summary", {})["llm_rerank_success"] = sum(
+                            1 for job in ranked if isinstance(ai_match_view(job).get("score"), (int, float))
+                        )
+                        st.session_state.setdefault("search_summary", {})["recommendation_level_counts"] = count_recommendation_levels(ranked)
+                        status.update(label="DeepSeek 精排完成", state="complete")
                     st.success("匹配完成")
 
                 ranked = st.session_state.get("ranked_jobs", [])
@@ -1715,17 +2024,18 @@ def main():
                     )
                     selected_job = source_jobs[selected_idx]
 
-                    if selected_job.get("job_decision"):
-                        decision = selected_job.get("job_decision", {})
-                        level = decision.get("level", "未评估")
-                        st.markdown(
-                            f'<span class="cp-level {level_class(level)}">{level}</span>',
-                            unsafe_allow_html=True,
-                        )
-                        st.json(decision, expanded=False)
+                    with st.expander("匹配结论", expanded=True):
+                        render_match_summary(selected_job)
 
                     with st.expander("岗位详情", expanded=False):
-                        st.json({k: v for k, v in selected_job.items() if k != "resume_match"})
+                        render_job_detail_summary(selected_job)
+
+                    with st.expander("开发者调试信息", expanded=False):
+                        st.json({
+                            "ai_match": ai_match_view(selected_job),
+                            "job_decision": selected_job.get("job_decision", {}),
+                            "job_raw": {k: v for k, v in selected_job.items() if k != "resume_match"},
+                        }, expanded=False)
 
                     local_profile = st.session_state.get("resume_profile") or (agent_result or {}).get("resume_profile") or {}
                     local_advice = build_local_job_advice(selected_job, local_profile)
@@ -1753,7 +2063,15 @@ def main():
                             save_job_feedback(selected_job, feedback_status, feedback_note)
                         st.success("已保存到本地求职记忆")
 
-                    if st.button("生成 DeepSeek 简历优化与面试建议", type="primary", width="stretch"):
+                    action_cols = st.columns(3)
+                    with action_cols[0]:
+                        generate_advice = st.button("生成简历优化建议", type="primary", width="stretch")
+                    with action_cols[1]:
+                        generate_gap = st.button("生成 JD 差距分析", width="stretch")
+                    with action_cols[2]:
+                        generate_pack = st.button("生成面试准备包", width="stretch")
+
+                    if generate_advice:
                         with st.spinner("DeepSeek 正在生成建议..."):
                             advice = generate_resume_job_advice(resume_text, selected_job)
                             st.session_state["advice"] = advice
@@ -1763,23 +2081,51 @@ def main():
                             out.write_text(advice, encoding="utf-8")
                             st.session_state["advice_path"] = str(out)
 
+                    if generate_gap:
+                        with st.spinner("DeepSeek 正在生成 JD 差距分析..."):
+                            gap = generate_job_gap_analysis(resume_text, selected_job)
+                            st.session_state["gap_analysis"] = gap
+                            safe_name = f"{selected_job.get('company','job')}_{selected_job.get('title','')}".replace("/", "_").replace(" ", "_")[:50]
+                            OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+                            out = OUTPUT_DIR / f"job_gap_analysis_{safe_name}.md"
+                            out.write_text(gap, encoding="utf-8")
+                            st.session_state["gap_analysis_path"] = str(out)
+
+                    if generate_pack:
+                        with st.spinner("DeepSeek 正在生成面试准备包..."):
+                            pack = generate_interview_pack(resume_text, selected_job)
+                            st.session_state["interview_pack"] = pack
+                            safe_name = f"{selected_job.get('company','job')}_{selected_job.get('title','')}".replace("/", "_").replace(" ", "_")[:50]
+                            OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+                            out = OUTPUT_DIR / f"interview_pack_{safe_name}.md"
+                            out.write_text(pack, encoding="utf-8")
+                            st.session_state["interview_pack_path"] = str(out)
+
                     if st.session_state.get("advice"):
+                        st.markdown("### 简历优化建议")
                         st.markdown(st.session_state["advice"])
                         st.caption(f"已保存到：{st.session_state.get('advice_path')}")
                         st.download_button("下载建议 Markdown", st.session_state["advice"], file_name="resume_advice.md")
+                    if st.session_state.get("gap_analysis"):
+                        st.markdown("### JD 差距分析")
+                        st.markdown(st.session_state["gap_analysis"])
+                        st.caption(f"已保存到：{st.session_state.get('gap_analysis_path')}")
+                        st.download_button("下载差距分析 Markdown", st.session_state["gap_analysis"], file_name="job_gap_analysis.md")
+                    if st.session_state.get("interview_pack"):
+                        st.markdown("### 面试准备包")
+                        st.markdown(st.session_state["interview_pack"])
+                        st.caption(f"已保存到：{st.session_state.get('interview_pack_path')}")
+                        st.download_button("下载面试准备包 Markdown", st.session_state["interview_pack"], file_name="interview_pack.md")
 
             with tab_resume:
-                st.write("这里用于把简历原文整理成结构化信息。")
-                if st.button("解析简历结构"):
-                    with st.spinner("DeepSeek 正在解析简历..."):
-                        profile = build_resume_profile(resume_text)
-                        st.session_state["resume_profile"] = profile
-
-                if st.session_state.get("resume_profile"):
-                    st.json(st.session_state["resume_profile"])
+                st.write("上传简历后会自动解析画像，这里只展示可读摘要。")
+                render_resume_profile_summary(st.session_state.get("resume_profile", {}))
 
                 with st.expander("查看解析出的简历文本", expanded=False):
                     st.text_area("简历文本", resume_text, height=320)
+
+                with st.expander("开发者调试信息", expanded=False):
+                    st.json(st.session_state.get("resume_profile", {}), expanded=False)
 
     with right_col:
         with st.container(border=True):
@@ -1797,6 +2143,7 @@ def main():
                     st.markdown("**下一步**")
                     for item in next_actions:
                         st.write(f"- {item}")
+                render_agent_trace(agent_result, agent_result.get("summary", {}) or summary, jobs)
                 if agent_result.get("report"):
                     st.download_button(
                         "下载 Agent 报告",
@@ -1804,17 +2151,16 @@ def main():
                         file_name="CareerPilot_agent_search_report.md",
                         width="stretch",
                     )
-                with st.expander("执行步骤", expanded=False):
-                    st.dataframe(
-                        pd.DataFrame(agent_result.get("run_record", {}).get("steps", [])),
-                        width="stretch",
-                        hide_index=True,
-                    )
                 with st.expander("搜索计划", expanded=False):
-                    st.json(agent_result.get("plan", {}))
+                    render_agent_plan_summary(agent_result.get("plan", {}))
                 if agent_result.get("resume_profile"):
                     with st.expander("简历画像", expanded=False):
-                        st.json(agent_result.get("resume_profile", {}))
+                        render_resume_profile_summary(agent_result.get("resume_profile", {}))
+                with st.expander("开发者调试信息", expanded=False):
+                    st.json({
+                        "plan": agent_result.get("plan", {}),
+                        "resume_profile": agent_result.get("resume_profile", {}),
+                    }, expanded=False)
             else:
                 st.markdown(
                     '<div class="cp-empty">启动一次 Agent 检索后，这里会显示搜索计划、过程解释、报告和下一步建议。</div>',
@@ -1850,7 +2196,7 @@ def main():
                             "任务ID": item.get("run_id", ""),
                             "状态": item.get("status", ""),
                             "目标": item.get("goal_text", ""),
-                            "岗位数": item.get("job_count", ""),
+                            "岗位数": int(item.get("job_count") or 0),
                             "更新时间": item.get("updated_at", ""),
                         }
                         for item in runs

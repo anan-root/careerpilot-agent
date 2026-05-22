@@ -150,6 +150,14 @@ def _build_decision_overview_section(jobs: list[dict[str, Any]]) -> list[str]:
         return lines
 
     lines.append(f"- 推荐等级分布：{_dict_text(counts)}")
+    llm_requested = sum(1 for job in jobs if (job.get("resume_match") or {}).get("ai") or job.get("ai_match"))
+    llm_success = sum(
+        1
+        for job in jobs
+        if isinstance((job.get("ai_match") or (job.get("resume_match") or {}).get("ai") or {}).get("score"), (int, float))
+    )
+    if llm_requested:
+        lines.append(f"- DeepSeek 简历精排：请求 {llm_requested} 个，成功 {llm_success} 个")
     top = jobs[0]
     top_decision = top.get("job_decision") or {}
     lines.append(
@@ -189,16 +197,21 @@ def _build_top_jobs_section(jobs: list[dict[str, Any]], limit: int = 10) -> list
 
     for index, job in enumerate(jobs[:limit], 1):
         decision = job.get("job_decision") or {}
+        ai_match = job.get("ai_match") or (job.get("resume_match") or {}).get("ai") or {}
+        matched_reasons = ai_match.get("matched_evidence") or decision.get("matched_reasons")
+        risks = ai_match.get("risk_points") or ai_match.get("risks") or decision.get("risks")
+        resume_actions = ai_match.get("resume_actions") or decision.get("resume_actions")
+        interview_focus = ai_match.get("interview_focus") or decision.get("interview_focus")
         lines.extend([
             f"### {index}. {_clean(job.get('company'))} - {_clean(job.get('title'))}",
             "",
             f"- 推荐：{decision.get('level', '未评估')} / {decision.get('score', '')} 分",
             f"- 地点：{_clean(job.get('location'))}；地址：{_clean(job.get('company_address')) or '未知'}",
             f"- 工作制/福利：{_clean(job.get('weekend_display') or job.get('weekend_policy')) or '未知'}；{_clean(job.get('welfare')) or '无公开福利'}",
-            f"- 推荐理由：{_join(decision.get('matched_reasons')) or '暂无'}",
-            f"- 风险点：{_join(decision.get('risks')) or '暂无明显风险'}",
-            f"- 简历动作：{_join(decision.get('resume_actions')) or '补充岗位关键词证据'}",
-            f"- 面试准备：{_join(decision.get('interview_focus')) or '准备项目细节和岗位职责追问'}",
+            f"- 匹配证据：{_join(matched_reasons) or '暂无'}",
+            f"- 风险点：{_join(risks) or '暂无明显风险'}",
+            f"- 简历动作：{_join(resume_actions) or '补充岗位关键词证据'}",
+            f"- 面试准备：{_join(interview_focus) or '准备项目细节和岗位职责追问'}",
         ])
         url = job.get("source_url") or job.get("url")
         if url:

@@ -128,6 +128,8 @@ def finish_agent_run(run_id: str, result: dict, report_path: str = "") -> dict:
         "raw_total": summary.get("search_raw_total", len(jobs)),
         "filtered_total": summary.get("search_filtered_total", len(jobs)),
         "final_total": summary.get("search_final_total", len(jobs)),
+        "llm_rerank_requested": summary.get("llm_rerank_requested", 0),
+        "llm_rerank_success": summary.get("llm_rerank_success", 0),
         "top_job": _top_job_summary(jobs),
         "top_jobs": _top_jobs_summary(jobs),
         "report_path": report_path,
@@ -293,6 +295,7 @@ def _top_jobs_summary(jobs: list[dict], limit: int = 10) -> list[dict]:
     rows = []
     for job in jobs[:limit]:
         decision = job.get("job_decision") or {}
+        ai_match = job.get("ai_match") or (job.get("resume_match") or {}).get("ai") or {}
         rows.append({
             "company": job.get("company", ""),
             "title": job.get("title", ""),
@@ -304,10 +307,10 @@ def _top_jobs_summary(jobs: list[dict], limit: int = 10) -> list[dict]:
             "weekend": job.get("weekend_display") or job.get("weekend_policy", ""),
             "level": decision.get("level", ""),
             "score": decision.get("score", ""),
-            "matched_reasons": decision.get("matched_reasons", [])[:3],
-            "risks": decision.get("risks", [])[:3],
-            "resume_actions": decision.get("resume_actions", [])[:3],
-            "interview_focus": decision.get("interview_focus", [])[:3],
+            "matched_reasons": (ai_match.get("matched_evidence") or decision.get("matched_reasons", []))[:3],
+            "risks": (ai_match.get("risk_points") or ai_match.get("risks") or decision.get("risks", []))[:3],
+            "resume_actions": (ai_match.get("resume_actions") or decision.get("resume_actions", []))[:3],
+            "interview_focus": (ai_match.get("interview_focus") or decision.get("interview_focus", []))[:3],
         })
     return rows
 

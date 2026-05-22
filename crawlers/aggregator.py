@@ -15,7 +15,7 @@ import re
 import random
 import time
 from collections import Counter
-from typing import Literal
+from typing import Callable, Literal
 
 import db
 from job_filters import enrich_job_fields, filter_jobs
@@ -58,6 +58,7 @@ def collect_all_jobs(
     use_browser_crawlers: bool = False,
     allow_browser_login: bool = False,
     search_keywords: list[str] | None = None,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> list[dict]:
     """Collect jobs from selected platforms, store in DB, return list.
 
@@ -87,6 +88,7 @@ def collect_all_jobs(
 
     for platform_index, platform in enumerate(platforms):
         platform_jobs: list[dict] = []
+        _emit_progress(progress_callback, f"开始检索平台：{platform}（{platform_index + 1}/{len(platforms)}）")
         if platform in {"boss", "boss_drission"} and allow_browser_login:
             platform_jobs = _fetch_boss_browser_keywords(
                 platform,
@@ -96,10 +98,15 @@ def collect_all_jobs(
                 use_browser_crawlers=use_browser_crawlers,
                 keyword_fetch_counts=keyword_fetch_counts,
                 platform_fetch_counts=platform_fetch_counts,
+                progress_callback=progress_callback,
             )
         else:
             for keyword_index, search_keyword in enumerate(keywords):
                 try:
+                    _emit_progress(
+                        progress_callback,
+                        f"{platform} 正在搜索关键词：{search_keyword}（{keyword_index + 1}/{len(keywords)}）",
+                    )
                     jobs = _fetch_platform(
                         platform,
                         search_keyword,
@@ -112,11 +119,13 @@ def collect_all_jobs(
                         job.setdefault("crawl_keyword", search_keyword)
                         job.setdefault("crawl_status", _default_crawl_status(platform, use_browser_crawlers))
                     logger.info("[%s] keyword='%s' fetched %d jobs", platform, search_keyword, len(jobs))
+                    _emit_progress(progress_callback, f"{platform} / {search_keyword} 获取 {len(jobs)} 个候选")
                     keyword_fetch_counts[f"{platform}:{search_keyword}"] = len(jobs)
                     platform_fetch_counts[str(platform)] += len(jobs)
                     platform_jobs.extend(jobs)
                 except Exception as e:
                     logger.error("[%s] keyword='%s' failed: %s", platform, search_keyword, e)
+                    _emit_progress(progress_callback, f"{platform} / {search_keyword} 检索失败：{e}")
                     keyword_fetch_counts[f"{platform}:{search_keyword}"] = 0
 
                 if keyword_index < len(keywords) - 1:
@@ -126,6 +135,7 @@ def collect_all_jobs(
             platform_jobs = _deduplicate(platform_jobs)
         platform_merged_counts[str(platform)] = len(platform_jobs)
         logger.info("[%s] merged %d jobs from %d keywords", platform, len(platform_jobs), len(keywords))
+        _emit_progress(progress_callback, f"{platform} 合并去重后 {len(platform_jobs)} 个候选")
         all_jobs.extend(platform_jobs)
 
         if platform_index < len(platforms) - 1:
@@ -139,11 +149,14 @@ def collect_all_jobs(
     if enrich_details:
         from crawlers.detail_enricher import enrich_job_details
 
+        _emit_progress(progress_callback, f"开始二次抓取详情页，上限 {detail_limit} 个")
         all_jobs = enrich_job_details(all_jobs, limit=detail_limit)
     for job in all_jobs:
         enrich_job_fields(job)
+    _emit_progress(progress_callback, f"开始按岗位类型、薪资、学历、经验等条件筛选 {len(all_jobs)} 个候选")
     filtered = filter_jobs(all_jobs, criteria)
     deduped = _deduplicate(filtered)
+    _emit_progress(progress_callback, f"筛选后 {len(filtered)} 个，最终去重展示 {len(deduped)} 个")
     platform_final_counts = Counter(job.get("platform", "unknown") for job in deduped)
     platform_filtered_counts = Counter(job.get("platform", "unknown") for job in filtered)
     detail_counts = Counter(job.get("detail_status", "not_requested") for job in all_jobs)
@@ -245,16 +258,19 @@ def _fetch_boss_browser_keywords(
     use_browser_crawlers: bool,
     keyword_fetch_counts: dict[str, int],
     platform_fetch_counts: Counter[str],
+    progress_callback: Callable[[str], None] | None = None,
 ) -> list[dict]:
     """Fetch all Boss keywords in one browser session."""
     from crawlers.boss_drission import search_boss_drission_batch
 
     try:
+        _emit_progress(progress_callback, "Boss 登录浏览器路径已启用，正在复用已登录窗口或等待登录态确认")
         results = search_boss_drission_batch(
             keywords,
             location,
             max_pages=max_pages,
             auto_login=True,
+            progress_callback=progress_callback,
         )
     except Exception as e:
         logger.error("[%s] Boss browser batch failed: %s", platform, e)
@@ -267,6 +283,7 @@ def _fetch_boss_browser_keywords(
         jobs = results.get(search_keyword, [])
         if not jobs:
             try:
+                _emit_progress(progress_callback, f"Boss / {search_keyword} 浏览器结果为空，尝试非交互兜底")
                 jobs = _fetch_boss_with_fallback(
                     search_keyword,
                     location,
@@ -280,10 +297,20 @@ def _fetch_boss_browser_keywords(
             job.setdefault("crawl_keyword", search_keyword)
             job.setdefault("crawl_status", _default_crawl_status("boss_drission", use_browser_crawlers))
         logger.info("[%s] keyword='%s' fetched %d jobs", platform, search_keyword, len(jobs))
+        _emit_progress(progress_callback, f"Boss / {search_keyword} 获取 {len(jobs)} 个候选")
         keyword_fetch_counts[f"{platform}:{search_keyword}"] = len(jobs)
         platform_fetch_counts[str(platform)] += len(jobs)
         platform_jobs.extend(jobs)
     return platform_jobs
+
+
+def _emit_progress(callback: Callable[[str], None] | None, message: str) -> None:
+    if callback is None:
+        return
+    try:
+        callback(message)
+    except Exception:
+        logger.debug("Progress callback failed", exc_info=True)
 
 
 def _fetch_platform(

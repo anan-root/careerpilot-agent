@@ -78,6 +78,21 @@ def decide_job(
     score += _memory_context_adjustment(job, memory_context, risks)
     score = _apply_confidence_cap(score, profile, matched_skills, matched_projects, risks)
 
+    ai_match = _ai_match(job)
+    ai_score = _safe_ai_score(ai_match.get("score"))
+    if ai_score is not None:
+        score = (score * 0.25) + (ai_score * 0.75)
+        if ai_match.get("matched_evidence"):
+            matched_reasons.insert(0, "DeepSeek 匹配证据：" + "；".join(ai_match.get("matched_evidence", [])[:2]))
+        if ai_match.get("missing_requirements"):
+            missing_requirements.extend(ai_match.get("missing_requirements", [])[:3])
+        if ai_match.get("risk_points"):
+            risks.extend(ai_match.get("risk_points", [])[:3])
+        if ai_match.get("resume_actions"):
+            resume_actions = [*ai_match.get("resume_actions", [])[:4], *resume_actions]
+        if ai_match.get("interview_focus"):
+            interview_focus = [*ai_match.get("interview_focus", [])[:5], *interview_focus]
+
     if not matched_reasons:
         matched_reasons.append("目前主要基于岗位基础条件进入候选列表，建议上传或完善简历画像后再精排")
 
@@ -88,12 +103,13 @@ def decide_job(
     score = round(max(0.0, min(100.0, score)), 1)
     return {
         "score": score,
-        "level": _level(score, risks),
+        "level": _decision_level(score, risks, ai_match),
         "matched_reasons": matched_reasons[:5],
         "missing_requirements": missing_requirements[:5],
         "risks": risks[:6],
         "resume_actions": resume_actions[:5],
         "interview_focus": interview_focus[:6],
+        "ai_match_used": ai_score is not None,
     }
 
 
@@ -329,6 +345,42 @@ def _level(score: float, risks: list[str]) -> str:
     if score >= 45:
         return "谨慎"
     return "不建议"
+
+
+def _decision_level(score: float, risks: list[str], ai_match: dict) -> str:
+    if any("命中排除词" in risk for risk in risks):
+        return "不建议"
+    ai_level = str(ai_match.get("level") or "")
+    if ai_level == "不建议" and score < 70:
+        return "不建议"
+    if score >= 90:
+        return "强推"
+    if score >= 80:
+        return "推荐"
+    if score >= 70:
+        return "可投"
+    if score >= 60:
+        return "谨慎"
+    if score >= 50:
+        return "备选"
+    return "不建议"
+
+
+def _ai_match(job: dict) -> dict:
+    match = job.get("ai_match")
+    if isinstance(match, dict):
+        return match
+    resume_match = job.get("resume_match") or {}
+    match = resume_match.get("ai")
+    return match if isinstance(match, dict) else {}
+
+
+def _safe_ai_score(value: object) -> float | None:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(100.0, score))
 
 
 def _unique(items: list[str]) -> list[str]:

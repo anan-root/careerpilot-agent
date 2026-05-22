@@ -20,12 +20,15 @@ from memory.store import (
 )
 from platform_registry import platform_label, platform_label_text
 
+DEFAULT_LLM_RERANK_TOP_N = 3
+
 
 def run_agent_search(
     goal_text: str,
     resume_text: str | None = None,
     *,
     allow_browser_login: bool | None = None,
+    progress_callback=None,
 ) -> dict:
     """Plan and execute a safe job search from a natural-language goal."""
     run = create_agent_run(goal_text, resume_present=bool(resume_text))
@@ -37,9 +40,11 @@ def run_agent_search(
             "读取简历画像",
             detail="已从上传简历生成画像" if resume_text else "已读取本地画像或空画像",
         )
+        _emit_progress(progress_callback, "已读取简历画像")
 
         memory_context = build_memory_context()
         add_agent_run_step(run_id, "读取求职记忆", detail=memory_context.get("summary", "暂无记忆"))
+        _emit_progress(progress_callback, "已读取求职记忆")
         if resume_profile:
             resume_profile = {**resume_profile, "_memory_context": memory_context}
         plan = build_search_plan(goal_text, resume_profile)
@@ -51,6 +56,10 @@ def run_agent_search(
             run_id,
             "制定搜索计划",
             detail=f"{plan.get('location', '上海')} / {plan.get('keyword', '')} / {platform_label_text(plan.get('platforms'))}",
+        )
+        _emit_progress(
+            progress_callback,
+            f"搜索计划：{plan.get('location', '上海')} / {plan.get('keyword', '')} / {platform_label_text(plan.get('platforms'))}",
         )
 
         criteria = dict(plan.get("criteria") or {})
@@ -70,6 +79,7 @@ def run_agent_search(
             detail_limit=0,
             use_browser_crawlers=bool(safety.get("use_browser_crawlers", False)),
             allow_browser_login=bool(safety.get("allow_browser_login", False)),
+            progress_callback=progress_callback,
         )
         summary = get_last_search_summary()
         add_agent_run_step(
@@ -79,10 +89,28 @@ def run_agent_search(
         )
 
         if resume_text and jobs:
-            jobs = rank_jobs_for_resume(resume_text, jobs, top_n=None, ai_top_n=0)
-            add_agent_run_step(run_id, "简历快速匹配", detail=f"已对 {len(jobs)} 个岗位计算简历匹配")
+            ai_top_n = min(DEFAULT_LLM_RERANK_TOP_N, len(jobs))
+            jobs = rank_jobs_for_resume(
+                resume_text,
+                jobs,
+                top_n=None,
+                ai_top_n=ai_top_n,
+                progress_callback=progress_callback,
+                resume_cache_key=_resume_cache_key(resume_text),
+            )
+            ai_success = _ai_match_success_count(jobs)
+            summary["llm_rerank_requested"] = ai_top_n
+            summary["llm_rerank_success"] = ai_success
+            add_agent_run_step(
+                run_id,
+                "DeepSeek 简历精排",
+                detail=f"本地初筛 {len(jobs)} 个岗位，DeepSeek 精排前 {ai_top_n} 个，成功 {ai_success} 个",
+            )
+            _emit_progress(progress_callback, f"DeepSeek 精排完成：请求 {ai_top_n} 个，成功 {ai_success} 个")
         jobs = rank_jobs_with_decisions(jobs, resume_profile, plan)
         add_agent_run_step(run_id, "岗位决策排序", detail=f"已生成 {len(jobs)} 个岗位推荐判断")
+        _emit_progress(progress_callback, f"岗位决策排序完成：{len(jobs)} 个岗位")
+        summary["recommendation_level_counts"] = _decision_counts(jobs)
 
         save_search_history(goal_text, plan, summary)
         result = {
@@ -114,6 +142,8 @@ def build_agent_message(plan: dict, summary: dict, jobs: list[dict], *, has_resu
     type_counts = summary.get("search_type_counts", {})
     final_counts = summary.get("search_final_platform_counts", {})
     field_counts = summary.get("search_field_counts", {})
+    llm_requested = int(summary.get("llm_rerank_requested", 0) or 0)
+    llm_success = int(summary.get("llm_rerank_success", 0) or 0)
     memory_summary = (plan.get("_memory_summary") or "").strip()
 
     parts = [
@@ -130,6 +160,8 @@ def build_agent_message(plan: dict, summary: dict, jobs: list[dict], *, has_resu
     if field_counts:
         readable_fields = _format_field_counts(field_counts)
         parts.append(f"字段完整度：{readable_fields}。")
+    if has_resume and llm_requested:
+        parts.append(f"DeepSeek 简历精排：请求 {llm_requested} 个，成功 {llm_success} 个；失败岗位已自动保留本地规则评分。")
 
     notes = plan.get("notes") or []
     if notes:
@@ -193,3 +225,27 @@ def _decision_counts(jobs: list[dict]) -> dict[str, int]:
         level = job.get("job_decision", {}).get("level", "未评估")
         counts[level] = counts.get(level, 0) + 1
     return counts
+
+
+def _ai_match_success_count(jobs: list[dict]) -> int:
+    count = 0
+    for job in jobs:
+        match = job.get("ai_match") or (job.get("resume_match") or {}).get("ai") or {}
+        if isinstance(match, dict) and isinstance(match.get("score"), (int, float)):
+            count += 1
+    return count
+
+
+def _emit_progress(callback, message: str) -> None:
+    if callback is None:
+        return
+    try:
+        callback(message)
+    except Exception:
+        pass
+
+
+def _resume_cache_key(resume_text: str) -> str:
+    import hashlib
+
+    return hashlib.sha1(str(resume_text or "").strip().encode("utf-8")).hexdigest()[:16]
