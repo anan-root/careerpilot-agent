@@ -1,9 +1,20 @@
 ﻿# CareerPilot Agent
 
-面向中文招聘市场的个人求职智能体。上传简历，说出目标，Agent 会规划搜索、采集岗位、解释结果、给出推荐决策、生成行动建议，并把每次求职任务记录成可复盘的本地记忆。
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?labelColor=2b2b2b&logo=python&logoColor=white)
+![Streamlit](https://img.shields.io/badge/Streamlit-1.36%2B-FF4B4B?labelColor=2b2b2b&logo=streamlit&logoColor=white)
+![DeepSeek](https://img.shields.io/badge/DeepSeek-API-0B5FFF?labelColor=2b2b2b)
+![SQLite](https://img.shields.io/badge/SQLite-local-4479A1?labelColor=2b2b2b&logo=sqlite&logoColor=white)
+![pandas](https://img.shields.io/badge/pandas-2.1%2B-150458?labelColor=2b2b2b&logo=pandas&logoColor=white)
+![DrissionPage](https://img.shields.io/badge/DrissionPage-4.1%2B-0E8A16?labelColor=2b2b2b)
+![status](https://img.shields.io/badge/status-MVP-007ACC?labelColor=2b2b2b)
 
-> 默认目标场景：上海 / AI Agent、RAG、大模型应用方向 / 社招和校招可选，默认排除实习。
-> 默认安全策略：不自动打开 Boss 登录浏览器；需要时由用户手动授权，不绕过登录、验证码或滑块。
+CareerPilot Agent 是一个面向中文招聘市场的个人求职智能体原型。它围绕“上传简历、说出目标、规划搜索、采集岗位、匹配简历、解释推荐、生成面试建议、沉淀求职记忆”这一条主流程，帮助求职者把多个招聘平台和简历文档里的信息收束到一个本地工作台。
+
+本项目当前定位为个人项目 / 本地 MVP / GitHub 展示系统：适合用于流程验证、AI 应用工程化练习和面试项目展示，不建议包装成已经大规模生产落地的招聘平台或自动投递系统。
+
+> 使用说明：默认目标场景为上海 / AI Agent、RAG、大模型应用方向；社招和校招可选，默认排除实习。交互式招聘平台页面默认不自动打开，需要时由用户手动开启。
+
+> 仓库说明：本地配置、运行资料、生成报告和个人求职记录只作为本地演示资料使用，公开仓库只保留源码、文档和示例配置。
 
 ## 现在能做什么
 
