@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from job_filters import DEGREE_LEVELS, enrich_job_fields
+from job_actions import NEGATIVE_STATUSES, POSITIVE_STATUSES
 from memory.store import load_job_feedback
 
 
@@ -208,12 +209,23 @@ def _excluded_term_adjustment(job: dict, excluded_terms: list[str], risks: list[
 
 def _field_completeness_adjustment(job: dict, risks: list[str]) -> float:
     score = 0.0
+    quality = _safe_quality_score(job.get("field_quality_score"))
+    if quality is not None and quality < 50:
+        risks.append("岗位信息不足，推荐结论需要人工确认")
+        score -= 8
+
     for key, label in (("experience", "经验"), ("degree", "学历"), ("salary", "薪资"), ("company_address", "地址")):
         if job.get(key):
             score += 1.5
         else:
             risks.append(f"{label}字段缺失")
             score -= 1.5
+    if quality is None:
+        return score
+    if quality >= 85:
+        return score + 4
+    if quality >= 70:
+        return score + 2
     return score
 
 
@@ -246,7 +258,7 @@ def _memory_feedback_adjustment(job: dict, feedback: list[dict], risks: list[str
         note = str(item.get("note") or "")
         status = str(item.get("status") or "")
         fb_company = str(item.get("company") or "")
-        if status == "不合适":
+        if status in NEGATIVE_STATUSES:
             if fb_company and fb_company == company:
                 risks.append("你曾标记该公司岗位不合适")
                 adjustment -= 14
@@ -254,7 +266,7 @@ def _memory_feedback_adjustment(job: dict, feedback: list[dict], risks: list[str
                 if term in note and term in text:
                     risks.append(f"命中过往负反馈：{term}")
                     adjustment -= 6
-        elif status in {"感兴趣", "已投递", "已沟通", "面试中"} and fb_company and fb_company == company:
+        elif status in POSITIVE_STATUSES and fb_company and fb_company == company:
             adjustment += 4
     return adjustment
 
@@ -376,6 +388,14 @@ def _ai_match(job: dict) -> dict:
 
 
 def _safe_ai_score(value: object) -> float | None:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(100.0, score))
+
+
+def _safe_quality_score(value: object) -> float | None:
     try:
         score = float(value)
     except (TypeError, ValueError):

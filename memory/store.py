@@ -210,11 +210,67 @@ def load_application_records(limit: int = 200) -> list[dict]:
     return _read_jsonl("applications.jsonl", limit=limit)
 
 
+def load_outreach_tasks() -> list[dict]:
+    tasks = read_json("outreach_tasks.json", []) or []
+    if not isinstance(tasks, list):
+        return []
+    normalized = [_normalize_outreach_task(task, index) for index, task in enumerate(tasks) if isinstance(task, dict)]
+    normalized.sort(key=lambda item: int(item.get("order", 0)))
+    return normalized
+
+
+def save_outreach_task(task: dict) -> dict:
+    tasks = load_outreach_tasks()
+    payload = _normalize_outreach_task(task, len(tasks))
+    now = _now()
+    payload["updated_at"] = now
+    task_id = payload.get("task_id") or f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
+    payload["task_id"] = task_id
+
+    replaced = False
+    for index, existing in enumerate(tasks):
+        if existing.get("task_id") == task_id:
+            payload.setdefault("created_at", existing.get("created_at") or now)
+            payload["created_at"] = payload.get("created_at") or existing.get("created_at") or now
+            payload["order"] = int(existing.get("order", index))
+            tasks[index] = payload
+            replaced = True
+            break
+    if not replaced:
+        payload["created_at"] = payload.get("created_at") or now
+        payload["order"] = len(tasks)
+        tasks.append(payload)
+
+    _write_ordered_outreach_tasks(tasks)
+    return payload
+
+
+def delete_outreach_task(task_id: str) -> bool:
+    tasks = load_outreach_tasks()
+    kept = [task for task in tasks if task.get("task_id") != task_id]
+    if len(kept) == len(tasks):
+        return False
+    _write_ordered_outreach_tasks(kept)
+    return True
+
+
+def move_outreach_task(task_id: str, direction: int) -> list[dict]:
+    tasks = load_outreach_tasks()
+    index = next((i for i, task in enumerate(tasks) if task.get("task_id") == task_id), None)
+    if index is None:
+        return tasks
+    target = max(0, min(len(tasks) - 1, index + int(direction)))
+    if target != index:
+        tasks[index], tasks[target] = tasks[target], tasks[index]
+    return _write_ordered_outreach_tasks(tasks)
+
+
 def export_memory_snapshot() -> dict:
     return {
         "profile": load_profile(),
         "job_feedback": load_job_feedback(limit=500),
         "applications": load_application_records(limit=500),
+        "outreach_tasks": load_outreach_tasks(),
         "search_history": _read_jsonl("search_history.jsonl", limit=200),
         "agent_runs": load_agent_runs(limit=100),
         "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -236,9 +292,115 @@ def save_application_record(job: dict, status: str, next_action: str = "", note:
     )
 
 
+def save_outreach_record(
+    job: dict,
+    *,
+    task_id: str = "",
+    action_type: str = "greeting",
+    message_text: str = "",
+    max_chars: int | None = None,
+    custom_prompt: str = "",
+    confirm_required: bool = True,
+    send_result: str = "",
+    platform_url: str = "",
+    error: str = "",
+    status: str = "drafted",
+    note: str = "",
+) -> Path:
+    return append_jsonl(
+        "applications.jsonl",
+        {
+            "job_key": _job_key(job),
+            "task_id": task_id,
+            "platform": job.get("platform", ""),
+            "company": job.get("company", ""),
+            "title": job.get("title", ""),
+            "status": status,
+            "action_type": action_type,
+            "message_text": message_text,
+            "max_chars": max_chars,
+            "custom_prompt": custom_prompt,
+            "confirm_required": bool(confirm_required),
+            "send_result": send_result,
+            "platform_url": platform_url or job.get("chat_url") or job.get("source_url") or job.get("url", ""),
+            "error": error,
+            "note": note,
+        },
+    )
+
+
 def _path(name: str) -> Path:
     safe_name = name.replace("\\", "/").lstrip("/")
     return MEMORY_DIR / safe_name
+
+
+def _normalize_outreach_task(task: dict, index: int = 0) -> dict:
+    payload = dict(task or {})
+    payload["task_id"] = str(payload.get("task_id") or "").strip()
+    payload["name"] = str(payload.get("name") or payload.get("keyword") or "未命名任务").strip()
+    payload["natural_text"] = str(payload.get("natural_text") or "").strip()
+    payload["keyword"] = str(payload.get("keyword") or payload.get("search_text") or "AI Agent").strip()
+    payload["search_text"] = str(payload.get("search_text") or payload.get("keyword") or "AI Agent").strip()
+    payload["cities"] = _normalize_text_list(payload.get("cities") or payload.get("cities_text") or payload.get("location") or "上海")
+    payload["cities_text"] = str(payload.get("cities_text") or " ".join(payload["cities"]) or "上海").strip()
+    payload["location"] = str(payload.get("location") or (payload["cities"][0] if payload["cities"] else "上海")).strip()
+    payload["platforms"] = _normalize_text_list(payload.get("platforms") or ["boss", "zhilian", "51job"])
+    payload["max_pages"] = _clamp_int(payload.get("max_pages"), 1, 10, 2)
+    payload["criteria"] = payload.get("criteria") if isinstance(payload.get("criteria"), dict) else {}
+    payload["job_types"] = _normalize_text_list(payload.get("job_types") or payload["criteria"].get("job_types") or ["社招"])
+    payload["ai_filter_text"] = str(payload.get("ai_filter_text") or "").strip()
+    payload["regex_include"] = str(payload.get("regex_include") or "").strip()
+    payload["regex_exclude"] = str(payload.get("regex_exclude") or "").strip()
+    payload["match_threshold"] = _clamp_int(payload.get("match_threshold"), 0, 100, 70)
+    payload["greeting_max_chars"] = _clamp_int(payload.get("greeting_max_chars"), 20, 300, 100)
+    payload["greeting_prompt"] = str(payload.get("greeting_prompt") or "").strip()
+    payload["reply_prompt"] = str(payload.get("reply_prompt") or "").strip()
+    payload["only_active_hr"] = bool(payload.get("only_active_hr", False))
+    payload["job_kind"] = str(payload.get("job_kind") or "").strip()
+    payload["send_limit"] = _clamp_int(payload.get("send_limit"), 1, 1, 1)
+    payload["order"] = _clamp_int(payload.get("order"), 0, 100000, index)
+    return payload
+
+
+def _write_ordered_outreach_tasks(tasks: list[dict]) -> list[dict]:
+    ordered = []
+    for index, task in enumerate(tasks):
+        item = _normalize_outreach_task(task, index)
+        item["order"] = index
+        ordered.append(item)
+    write_json("outreach_tasks.json", ordered)
+    return ordered
+
+
+def _normalize_text_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        raw = re_split_text(value)
+    elif isinstance(value, (list, tuple, set)):
+        raw = []
+        for item in value:
+            raw.extend(re_split_text(item) if isinstance(item, str) else [item])
+    else:
+        raw = []
+    result = []
+    for item in raw:
+        text = str(item or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def re_split_text(value: object) -> list[str]:
+    import re
+
+    return [part for part in re.split(r"[,，、\s/]+", str(value or "")) if part]
+
+
+def _clamp_int(value: object, min_value: int, max_value: int, default: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = int(default)
+    return max(min_value, min(max_value, number))
 
 
 def _write_agent_run(record: dict) -> Path:

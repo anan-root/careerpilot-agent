@@ -258,6 +258,67 @@ def export(fmt, output, all_columns):
         console.print(f"[green]✓[/] JSON 导出: {path}")
 
 
+@cli.command("import-job")
+@click.option("--title", default="", help="岗位名称")
+@click.option("--company", default="", help="公司名称")
+@click.option("--location", default="", help="工作地点")
+@click.option("--salary", default="", help="薪资")
+@click.option("--url", default="", help="岗位链接")
+@click.option("--jd", "jd_text", default="", help="直接传入 JD 文本")
+@click.option("--jd-file", type=click.Path(exists=True, dir_okay=False), default=None, help="从文本文件读取 JD")
+@click.option("--fetch-url", is_flag=True, help="尝试读取岗位链接页面正文")
+def import_job(title, company, location, salary, url, jd_text, jd_file, fetch_url):
+    """导入外部岗位 JD 到本地岗位库"""
+    from job_importer import build_job_from_url, build_manual_job, save_imported_job
+
+    if jd_file:
+        jd_text = Path(jd_file).read_text(encoding="utf-8", errors="ignore")
+    if not any(str(value or "").strip() for value in (title, company, location, salary, url, jd_text)):
+        console.print("[yellow]请提供 --jd、--jd-file，或至少填写一个岗位字段。[/]")
+        return
+
+    if fetch_url and url:
+        job = build_job_from_url(
+            url,
+            title=title,
+            company=company,
+            location=location,
+            salary=salary,
+            jd_text=jd_text,
+        )
+    else:
+        job = build_manual_job(
+            title=title,
+            company=company,
+            location=location,
+            salary=salary,
+            jd_text=jd_text,
+            url=url,
+        )
+    saved = save_imported_job(job)
+    console.print("[green]✓[/] 岗位已导入")
+
+    table = Table(title="导入结果", show_lines=True)
+    table.add_column("字段", width=14)
+    table.add_column("值")
+    for label, key in (
+        ("数据库ID", "db_id"),
+        ("公司", "company"),
+        ("岗位", "title"),
+        ("地点", "location"),
+        ("薪资", "salary"),
+        ("字段质量", "field_quality_score"),
+        ("缺失项", "field_quality_missing"),
+        ("读取状态", "detail_status"),
+        ("来源", "source_url"),
+    ):
+        value = saved.get(key, "")
+        if isinstance(value, list):
+            value = "、".join(value)
+        table.add_row(label, str(value))
+    console.print(table)
+
+
 @cli.command("match-resume")
 @click.argument("resume_path", type=click.Path(exists=True, dir_okay=False))
 @click.option("--top", "-n", default=10, help="展示匹配度最高的岗位数量")

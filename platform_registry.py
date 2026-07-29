@@ -16,6 +16,7 @@ PLATFORM_LABELS: dict[str, str] = {
     "dingxiang": "丁香人才网",
     "jobonline": "就业在线",
     "curated": "本地兜底",
+    "manual": "手动导入",
 }
 
 PLATFORM_ORDER: list[str] = [

@@ -454,6 +454,13 @@ def _score_job_against_resume(resume_text: str, resume_keywords: set[str], job: 
     description_bonus = 8 if any(k in resume_text for k in ("实习", "项目", "工程", "算法", "大模型", "Agent", "RAG")) else 0
 
     score = min(100.0, keyword_score + skill_score + title_score + description_bonus)
+    quality_score = _job_quality_score(job)
+    if quality_score is not None:
+        if quality_score >= 75:
+            score = min(100.0, score + 3)
+        elif quality_score < 50:
+            score = min(score, 68.0)
+
     if score >= 75:
         summary = "简历关键词和岗位要求重合较高，建议优先投递并做定制化优化。"
     elif score >= 55:
@@ -468,6 +475,7 @@ def _score_job_against_resume(resume_text: str, resume_keywords: set[str], job: 
         "matched_keywords": matched[:30],
         "skill_matches": skill_matched[:20],
         "missing_keywords": missing[:30],
+        "field_quality_score": quality_score,
         "summary": summary,
     }
 
@@ -534,6 +542,16 @@ def _safe_score(value) -> float:
         return max(0.0, min(100.0, float(value)))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _job_quality_score(job: dict) -> float | None:
+    value = job.get("field_quality_score")
+    if value in (None, ""):
+        return None
+    try:
+        return max(0.0, min(100.0, float(value)))
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_ai_match(data: dict) -> dict:

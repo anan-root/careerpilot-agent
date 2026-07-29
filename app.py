@@ -6,6 +6,7 @@ import json
 import re
 import hashlib
 import tempfile
+from collections import Counter
 from pathlib import Path
 from datetime import datetime
 from html import escape
@@ -26,12 +27,36 @@ from agents.resume_matcher import (
 from agents.advice_agent import build_local_job_advice
 from agents.career_orchestrator import run_agent_search
 from agents.conversation_agent import answer_agent_question
+from agents.outreach_agent import (
+    DEFAULT_GREETING_CONSTRAINT,
+    DEFAULT_REPLY_CONSTRAINT,
+    generate_boss_greeting,
+    generate_boss_reply,
+    normalize_max_chars,
+)
 from agents.profile_agent import build_resume_profile
 from agents.ranking_agent import rank_jobs_with_decisions
+from agents.search_strategy_agent import build_outreach_task_from_text
 from crawlers.aggregator import collect_all_jobs, get_last_search_summary
+from crawlers.boss_outreach import check_boss_chat, read_boss_chat_text, send_boss_message
+from job_importer import build_job_from_url, build_manual_job, save_imported_job
 from job_filters import filter_jobs
+from job_actions import annotate_jobs_with_actions
 from llm_client import get_llm_config
-from memory.store import export_memory_snapshot, load_agent_runs, save_application_record, save_job_feedback
+from match_dashboard import build_match_dashboard
+from memory.store import (
+    delete_outreach_task,
+    export_memory_snapshot,
+    load_application_records,
+    load_agent_runs,
+    load_job_feedback,
+    load_outreach_tasks,
+    move_outreach_task,
+    save_application_record,
+    save_job_feedback,
+    save_outreach_record,
+    save_outreach_task,
+)
 from platform_registry import (
     DEFAULT_PLATFORM_CODES,
     PLATFORM_LABELS,
@@ -39,6 +64,11 @@ from platform_registry import (
     normalize_platform,
     platform_label,
     platform_label_text,
+)
+from search_summary import (
+    merge_duplicate_summaries,
+    merge_invalid_job_summaries,
+    merge_job_quality_summaries,
 )
 
 OUTPUT_DIR = Path(__file__).parent / "data" / "outputs"
@@ -760,6 +790,9 @@ def run_search(
     st.session_state["search_signature"] = signature
     st.session_state["manual_search_signature"] = signature
     st.session_state["active_search_source"] = "manual"
+    st.session_state["result_display_platforms"] = list(platforms or [])
+    st.session_state["result_display_location"] = location
+    st.session_state["result_display_criteria"] = dict(criteria or {})
     st.session_state["last_search_label"] = (
         f"{location} / {keyword} / 平台:{platform_label_text(platforms)} / "
         f"页数:{int(max_pages)} / 类型:{', '.join(criteria.get('job_types') or ['全部'])}"
@@ -769,6 +802,736 @@ def run_search(
     reset_result_pagination()
     load_jobs.clear()
     return jobs
+
+
+def run_task_search(
+    task: dict,
+    signature: str,
+    *,
+    use_browser_crawlers: bool = False,
+    allow_browser_login: bool = False,
+    progress_callback=None,
+) -> list[dict]:
+    criteria = task_criteria(task)
+    cities = task_cities(task)
+    platforms = task_platforms(task)
+    keyword = str(task.get("search_text") or task.get("keyword") or "AI Agent").strip() or "AI Agent"
+    max_pages = int(task.get("max_pages") or 2)
+    expanded_keywords = [str(item).strip() for item in (task.get("expanded_keywords") or []) if str(item).strip()]
+
+    all_jobs: list[dict] = []
+    summaries: list[dict] = []
+    for index, city in enumerate(cities):
+        if progress_callback:
+            progress_callback(f"任务城市 {city}（{index + 1}/{len(cities)}）")
+        city_jobs = collect_all_jobs(
+            keyword,
+            city,
+            platforms=platforms,
+            max_pages=max_pages,
+            criteria=criteria,
+            expand_keywords=True,
+            max_keywords=max(1, len(expanded_keywords) or 5),
+            search_keywords=expanded_keywords or None,
+            enrich_details=True,
+            detail_limit=20,
+            use_browser_crawlers=use_browser_crawlers,
+            allow_browser_login=allow_browser_login,
+            progress_callback=progress_callback,
+        )
+        for job in city_jobs:
+            job.setdefault("task_city", city)
+        all_jobs.extend(city_jobs)
+        summaries.append(get_last_search_summary())
+
+    deduped = dedupe_jobs_for_task(all_jobs)
+    regex_filtered = apply_task_regex_filter(deduped, task.get("regex_include", ""), task.get("regex_exclude", ""))
+    active_filtered = apply_task_active_hr_filter(regex_filtered, task)
+    summary = merge_task_summaries(summaries, before_regex=len(deduped), after_regex=len(active_filtered), task=task)
+
+    st.session_state["current_jobs"] = active_filtered
+    st.session_state["search_summary"] = summary
+    st.session_state["search_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    st.session_state["search_signature"] = signature
+    st.session_state["task_search_signature"] = signature
+    st.session_state["active_search_source"] = "task"
+    st.session_state["active_outreach_task"] = dict(task)
+    st.session_state["task_platforms"] = platforms
+    st.session_state["task_criteria"] = criteria
+    st.session_state["result_display_platforms"] = platforms
+    st.session_state["result_display_location"] = None
+    st.session_state["result_display_criteria"] = criteria
+    st.session_state["last_search_label"] = (
+        f"{'/'.join(cities)} / {keyword} / 平台:{platform_label_text(platforms)} / "
+        f"页数:{max_pages} / 类型:{', '.join(criteria.get('job_types') or ['全部'])}"
+    )
+    st.session_state["search_dirty"] = False
+    clear_search_outputs()
+    reset_result_pagination()
+    load_jobs.clear()
+    return active_filtered
+
+
+def add_imported_job_to_workspace(job: dict) -> list[dict]:
+    current_jobs = list(st.session_state.get("current_jobs") or [])
+    jobs = dedupe_jobs_for_task([job, *current_jobs])
+    st.session_state["current_jobs"] = jobs
+
+    source_platform = platform_key(job.get("platform", "")) or "manual"
+    platforms = platform_keys(st.session_state.get("result_display_platforms") or [])
+    if source_platform not in platforms:
+        platforms = [source_platform, *platforms]
+    st.session_state["result_display_platforms"] = platforms
+    st.session_state["result_display_location"] = None
+    st.session_state.setdefault("result_display_criteria", {})
+    st.session_state["active_search_source"] = "manual_import"
+    st.session_state["search_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    st.session_state["last_search_label"] = f"手动导入岗位 / 当前结果 {len(jobs)} 个"
+    st.session_state["search_dirty"] = False
+
+    summary = dict(st.session_state.get("search_summary") or {})
+    summary["selected_platforms"] = platforms
+    summary["search_raw_total"] = len(jobs)
+    summary["search_filtered_total"] = len(jobs)
+    summary["search_final_total"] = len(jobs)
+    summary["search_keywords"] = summary.get("search_keywords") or ["手动导入"]
+    for key in (
+        "search_platform_fetch_counts",
+        "search_platform_merged_counts",
+        "search_raw_platform_counts",
+        "search_filtered_platform_counts",
+        "search_final_platform_counts",
+    ):
+        counts = Counter(summary.get(key) or {})
+        counts[source_platform] = sum(
+            1 for item in jobs
+            if platform_key(item.get("platform", "")) == source_platform
+        )
+        summary[key] = dict(counts)
+    summary["search_field_quality"] = summarize_field_quality(jobs)
+    st.session_state["search_summary"] = summary
+    clear_search_outputs()
+    reset_result_pagination()
+    load_jobs.clear()
+    return jobs
+
+
+def summarize_field_quality(jobs: list[dict]) -> dict[str, float | int]:
+    scores = [float(job.get("field_quality_score") or 0) for job in jobs]
+    if not scores:
+        return {"avg_score": 0.0, "high_quality": 0, "total": 0}
+    return {
+        "avg_score": round(sum(scores) / len(scores), 1),
+        "high_quality": sum(1 for score in scores if score >= 75),
+        "total": len(scores),
+    }
+
+
+def task_criteria(task: dict) -> dict:
+    criteria = dict(task.get("criteria") or {})
+    job_types = task.get("job_types") or criteria.get("job_types") or ["社招"]
+    criteria["job_types"] = [str(item) for item in job_types if str(item).strip()]
+    return criteria
+
+
+def task_cities(task: dict) -> list[str]:
+    cities = task.get("cities")
+    if isinstance(cities, str):
+        values = re.split(r"[,，、\s/]+", cities)
+    elif isinstance(cities, (list, tuple, set)):
+        values = []
+        for city in cities:
+            values.extend(re.split(r"[,，、\s/]+", str(city)))
+    else:
+        values = re.split(r"[,，、\s/]+", str(task.get("cities_text") or task.get("location") or "上海"))
+    result = []
+    for city in values:
+        text = str(city or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return result or ["上海"]
+
+
+def task_platforms(task: dict) -> list[str]:
+    values = task.get("platforms") or DEFAULT_PLATFORM_CODES
+    if isinstance(values, str):
+        raw = re.split(r"[,，、\s/]+", values)
+    else:
+        raw = list(values)
+    result = []
+    for value in raw:
+        key = platform_key(value)
+        if key and key not in result:
+            result.append(key)
+    return result or list(DEFAULT_PLATFORM_CODES)
+
+
+def task_display_text(job: dict) -> str:
+    keys = (
+        "title",
+        "company",
+        "location",
+        "salary",
+        "job_type",
+        "skills",
+        "degree",
+        "experience",
+        "description",
+        "requirements",
+        "full_jd",
+        "welfare",
+        "hr_name",
+        "hr_title",
+    )
+    return " ".join(str(job.get(key) or "") for key in keys)
+
+
+def apply_task_regex_filter(jobs: list[dict], include_text: str = "", exclude_text: str = "") -> list[dict]:
+    include_patterns = compile_task_patterns(include_text)
+    exclude_patterns = compile_task_patterns(exclude_text)
+    if not include_patterns and not exclude_patterns:
+        return list(jobs)
+    results = []
+    for job in jobs:
+        text = task_display_text(job)
+        if include_patterns and not any(pattern.search(text) for pattern in include_patterns):
+            continue
+        if exclude_patterns and any(pattern.search(text) for pattern in exclude_patterns):
+            continue
+        results.append(job)
+    return results
+
+
+def apply_task_active_hr_filter(jobs: list[dict], task: dict) -> list[dict]:
+    if not task.get("only_active_hr"):
+        return list(jobs)
+    results = []
+    for job in jobs:
+        if platform_key(job.get("platform", "")) != "boss":
+            results.append(job)
+            continue
+        if job.get("chat_url") or job.get("hr_name") or job.get("hr_title"):
+            results.append(job)
+    return results
+
+
+def compile_task_patterns(value: str) -> list[re.Pattern]:
+    patterns = []
+    for item in re.split(r"[,，、\n]+", str(value or "")):
+        text = item.strip()
+        if not text:
+            continue
+        try:
+            patterns.append(re.compile(text, flags=re.IGNORECASE))
+        except re.error:
+            patterns.append(re.compile(re.escape(text), flags=re.IGNORECASE))
+    return patterns
+
+
+def dedupe_jobs_for_task(jobs: list[dict]) -> list[dict]:
+    seen = set()
+    results = []
+    for job in jobs:
+        key = "|".join(str(job.get(field) or "").strip() for field in ("platform", "job_id", "company", "title"))
+        fallback_key = "|".join(str(job.get(field) or "").strip() for field in ("platform", "company", "title", "location"))
+        dedupe_key = key if key.strip("|") else fallback_key
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        results.append(job)
+    return results
+
+
+def merge_task_summaries(summaries: list[dict], *, before_regex: int, after_regex: int, task: dict) -> dict:
+    counter_keys = (
+        "search_platform_fetch_counts",
+        "search_platform_merged_counts",
+        "search_raw_platform_counts",
+        "search_filtered_platform_counts",
+        "search_final_platform_counts",
+        "search_type_counts",
+        "search_filtered_type_counts",
+        "search_detail_counts",
+    )
+    summary: dict = {
+        "selected_platforms": task_platforms(task),
+        "search_keywords": [],
+        "search_raw_total": 0,
+        "search_filtered_total": 0,
+        "search_final_total": after_regex,
+        "task_before_regex_total": before_regex,
+        "task_after_regex_total": after_regex,
+        "task_cities": task_cities(task),
+        "criteria": task_criteria(task),
+        "ai_filter_text": task.get("ai_filter_text", ""),
+        "match_threshold": task.get("match_threshold", 70),
+    }
+    for key in counter_keys:
+        merged = Counter()
+        for item in summaries:
+            merged.update(item.get(key) or {})
+        summary[key] = dict(merged)
+    field_counts: dict[str, Counter] = {}
+    for item in summaries:
+        for field, counts in (item.get("search_field_counts") or {}).items():
+            field_counts.setdefault(field, Counter()).update(counts or {})
+    summary["search_field_counts"] = {field: dict(counts) for field, counts in field_counts.items()}
+    summary["search_invalid_jobs"] = merge_invalid_job_summaries(summaries)
+    summary["search_duplicate_summary"] = merge_duplicate_summaries(summaries)
+    summary["search_job_quality"] = merge_job_quality_summaries(summaries)
+    keyword_fetch_counts: dict[str, int] = {}
+    for item in summaries:
+        for key, value in (item.get("search_keyword_fetch_counts") or {}).items():
+            keyword_fetch_counts[key] = keyword_fetch_counts.get(key, 0) + int(value or 0)
+        for keyword in item.get("search_keywords") or []:
+            if keyword not in summary["search_keywords"]:
+                summary["search_keywords"].append(keyword)
+        summary["search_raw_total"] += int(item.get("search_raw_total", 0) or 0)
+        summary["search_filtered_total"] += int(item.get("search_filtered_total", 0) or 0)
+    summary["search_keyword_fetch_counts"] = keyword_fetch_counts
+    return summary
+
+
+def apply_task_match_threshold(jobs: list[dict], task: dict | None) -> list[dict]:
+    if not task:
+        return jobs
+    threshold = int(task.get("match_threshold") or 0)
+    if threshold <= 0:
+        return jobs
+    filtered = []
+    for job in jobs:
+        score = parse_recommendation_score((job.get("job_decision") or {}).get("score"))
+        if score is None:
+            score = parse_recommendation_score((job.get("resume_match") or {}).get("score"))
+        if score is None or score >= threshold:
+            filtered.append(job)
+    return filtered
+
+
+def render_outreach_task_panel(
+    resume_profile: dict,
+    *,
+    platform_options: list[str],
+    use_browser_crawlers: bool,
+    allow_browser_login: bool,
+):
+    st.markdown('<div class="cp-panel-title">03 求职任务</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="cp-panel-note">用自然语言生成可编辑任务；保存后再手动执行搜索或生成沟通草稿。</div>',
+        unsafe_allow_html=True,
+    )
+
+    default_task_text = "ai应用 rag 大模型应用，上海北京深圳杭州，本科，8到20K，只投活跃 HR，100 字以内介绍 RAG 项目，不提薪资，语气礼貌"
+    natural_text = st.text_area(
+        "自然语言任务",
+        value=st.session_state.get("outreach_task_natural_text", default_task_text),
+        height=118,
+        key="outreach_task_natural_text",
+    )
+    parse_cols = st.columns([1, 1])
+    with parse_cols[0]:
+        parse_task = st.button("解析为草稿", width="stretch", key="outreach_task_parse")
+    with parse_cols[1]:
+        clear_draft = st.button("清空草稿", width="stretch", key="outreach_task_clear")
+    if parse_task:
+        draft = build_outreach_task_from_text(natural_text, resume_profile)
+        st.session_state["outreach_task_draft"] = draft
+        st.session_state["active_outreach_task"] = draft
+        sync_outreach_task_widget_state(draft)
+        st.success("已生成任务草稿，请检查后保存或直接检索。")
+    if clear_draft:
+        st.session_state.pop("outreach_task_draft", None)
+
+    with st.expander("已保存任务", expanded=False):
+        tasks = load_outreach_tasks()
+        if tasks:
+            for task in tasks[:12]:
+                row = st.columns([2.6, 0.9, 0.75, 0.75, 0.75])
+                with row[0]:
+                    st.write(f"{task.get('name', '未命名任务')} / {task.get('cities_text', '')}")
+                with row[1]:
+                    if st.button("加载", key=f"outreach_task_load_{task.get('task_id')}", width="stretch"):
+                        st.session_state["outreach_task_draft"] = dict(task)
+                        st.session_state["active_outreach_task"] = dict(task)
+                        sync_outreach_task_widget_state(task)
+                        st.rerun()
+                with row[2]:
+                    if st.button("上移", key=f"outreach_task_up_{task.get('task_id')}", width="stretch"):
+                        move_outreach_task(task.get("task_id", ""), -1)
+                        st.rerun()
+                with row[3]:
+                    if st.button("下移", key=f"outreach_task_down_{task.get('task_id')}", width="stretch"):
+                        move_outreach_task(task.get("task_id", ""), 1)
+                        st.rerun()
+                with row[4]:
+                    if st.button("删除", key=f"outreach_task_delete_{task.get('task_id')}", width="stretch"):
+                        delete_outreach_task(task.get("task_id", ""))
+                        if (st.session_state.get("active_outreach_task") or {}).get("task_id") == task.get("task_id"):
+                            st.session_state.pop("active_outreach_task", None)
+                        st.rerun()
+        else:
+            st.markdown('<div class="cp-muted">暂无已保存任务。</div>', unsafe_allow_html=True)
+
+    draft = dict(st.session_state.get("outreach_task_draft") or {})
+    if not draft:
+        return
+
+    with st.expander("任务草稿与设置", expanded=True):
+        name = st.text_input("任务名称", value=draft.get("name", ""), key="outreach_task_name")
+        search_text = st.text_input("搜索职位", value=draft.get("search_text") or draft.get("keyword") or "AI Agent", key="outreach_task_search_text")
+        cities_text = st.text_input("城市", value=draft.get("cities_text") or draft.get("location") or "上海", key="outreach_task_cities_text")
+        selected_platforms = st.multiselect(
+            "平台",
+            platform_options,
+            default=[p for p in task_platforms(draft) if p in platform_options],
+            key="outreach_task_platforms",
+            format_func=platform_label,
+        )
+        task_job_types = st.multiselect(
+            "求职类型",
+            ["社招", "校招", "实习"],
+            default=[item for item in (draft.get("job_types") or (draft.get("criteria") or {}).get("job_types") or ["社招"]) if item in {"社招", "校招", "实习"}],
+            key="outreach_task_job_types",
+        )
+        ai_filter_text = st.text_area(
+            "AI 筛选职位说明",
+            value=draft.get("ai_filter_text", ""),
+            height=80,
+            key="outreach_task_ai_filter",
+        )
+        regex_cols = st.columns(2)
+        with regex_cols[0]:
+            regex_include = st.text_input("包含关键词/正则", value=draft.get("regex_include", ""), key="outreach_task_regex_include")
+        with regex_cols[1]:
+            regex_exclude = st.text_input("排除关键词/正则", value=draft.get("regex_exclude", ""), key="outreach_task_regex_exclude")
+        more_cols = st.columns(3)
+        with more_cols[0]:
+            match_threshold = st.number_input(
+                "匹配度",
+                min_value=0,
+                max_value=100,
+                value=int(draft.get("match_threshold") or 70),
+                step=5,
+                key="outreach_task_match_threshold",
+            )
+        with more_cols[1]:
+            greeting_max_chars = st.number_input(
+                "打招呼字数",
+                min_value=20,
+                max_value=300,
+                value=normalize_max_chars(draft.get("greeting_max_chars") or 100),
+                step=10,
+                key="outreach_task_greeting_max",
+            )
+        with more_cols[2]:
+            max_pages = st.number_input(
+                "每城页数",
+                min_value=1,
+                max_value=10,
+                value=int(draft.get("max_pages") or 2),
+                key="outreach_task_max_pages",
+            )
+        only_active_hr = st.checkbox("只投活跃 HR", value=bool(draft.get("only_active_hr")), key="outreach_task_active_hr")
+        greeting_prompt = st.text_area(
+            "打招呼提示词边界",
+            value=draft.get("greeting_prompt") or DEFAULT_GREETING_CONSTRAINT,
+            height=86,
+            key="outreach_task_greeting_prompt",
+        )
+        reply_prompt = st.text_area(
+            "回复提示词边界",
+            value=draft.get("reply_prompt") or DEFAULT_REPLY_CONSTRAINT,
+            height=86,
+            key="outreach_task_reply_prompt",
+        )
+
+        updated = dict(draft)
+        updated.update({
+            "name": name.strip() or search_text.strip() or "未命名任务",
+            "keyword": search_text.strip() or "AI Agent",
+            "search_text": search_text.strip() or "AI Agent",
+            "cities_text": cities_text.strip() or "上海",
+            "cities": [item for item in re.split(r"[,，、\s/]+", cities_text) if item.strip()],
+            "location": next((item for item in re.split(r"[,，、\s/]+", cities_text) if item.strip()), "上海"),
+            "platforms": selected_platforms or ["boss"],
+            "job_types": task_job_types or ["社招"],
+            "ai_filter_text": ai_filter_text,
+            "regex_include": regex_include,
+            "regex_exclude": regex_exclude,
+            "match_threshold": int(match_threshold),
+            "greeting_max_chars": int(greeting_max_chars),
+            "greeting_prompt": greeting_prompt,
+            "reply_prompt": reply_prompt,
+            "only_active_hr": bool(only_active_hr),
+            "max_pages": int(max_pages),
+        })
+        criteria = dict(updated.get("criteria") or {})
+        criteria["job_types"] = updated["job_types"]
+        updated["criteria"] = criteria
+        st.session_state["outreach_task_draft"] = updated
+        st.session_state["active_outreach_task"] = updated
+
+        if updated.get("notes"):
+            st.caption("；".join(str(item) for item in updated.get("notes", [])[:3]))
+
+        action_cols = st.columns([1, 1])
+        with action_cols[0]:
+            if st.button("保存任务", type="primary", width="stretch", key="outreach_task_save"):
+                saved = save_outreach_task(updated)
+                st.session_state["outreach_task_draft"] = saved
+                st.session_state["active_outreach_task"] = saved
+                st.success("任务已保存到本地 JSON。")
+                st.rerun()
+        with action_cols[1]:
+            if st.button("按任务检索", width="stretch", key="outreach_task_search"):
+                signature = json.dumps(updated, ensure_ascii=False, sort_keys=True)
+                with st.status("正在按任务检索...", expanded=True) as status:
+                    jobs_found = run_task_search(
+                        updated,
+                        signature,
+                        use_browser_crawlers=use_browser_crawlers,
+                        allow_browser_login=allow_browser_login,
+                        progress_callback=make_status_progress(status),
+                    )
+                    status.update(label=f"任务检索完成，本次结果 {len(jobs_found)} 个", state="complete")
+                st.success(f"任务检索完成，本次结果 {len(jobs_found)} 个")
+                st.session_state["career_workspace_v1"] = "岗位结果"
+                st.rerun()
+
+
+def sync_outreach_task_widget_state(task: dict) -> None:
+    cities_text = task.get("cities_text") or " ".join(task_cities(task))
+    values = {
+        "outreach_task_name": task.get("name", ""),
+        "outreach_task_search_text": task.get("search_text") or task.get("keyword") or "AI Agent",
+        "outreach_task_cities_text": cities_text or "上海",
+        "outreach_task_platforms": task_platforms(task),
+        "outreach_task_job_types": task.get("job_types") or (task.get("criteria") or {}).get("job_types") or ["社招"],
+        "outreach_task_ai_filter": task.get("ai_filter_text", ""),
+        "outreach_task_regex_include": task.get("regex_include", ""),
+        "outreach_task_regex_exclude": task.get("regex_exclude", ""),
+        "outreach_task_match_threshold": int(task.get("match_threshold") or 70),
+        "outreach_task_greeting_max": normalize_max_chars(task.get("greeting_max_chars") or 100),
+        "outreach_task_max_pages": int(task.get("max_pages") or 2),
+        "outreach_task_active_hr": bool(task.get("only_active_hr")),
+        "outreach_task_greeting_prompt": task.get("greeting_prompt") or DEFAULT_GREETING_CONSTRAINT,
+        "outreach_task_reply_prompt": task.get("reply_prompt") or DEFAULT_REPLY_CONSTRAINT,
+    }
+    for key, value in values.items():
+        st.session_state[key] = value
+
+
+def render_boss_outreach_panel(selected_job: dict, profile: dict, task: dict | None):
+    task = task or {}
+    is_boss = platform_key(selected_job.get("platform", "")) == "boss"
+    chat_url = str(selected_job.get("chat_url") or "").strip()
+    task_id = str(task.get("task_id") or "")
+    outreach_key = "|".join(
+        str(selected_job.get(field) or "").strip()
+        for field in ("platform", "job_id", "company", "title")
+    )
+    if st.session_state.get("boss_outreach_job_key") != outreach_key:
+        st.session_state["boss_outreach_job_key"] = outreach_key
+        for key in (
+            "boss_outreach_greeting_text",
+            "boss_outreach_reply_text",
+            "boss_outreach_hr_text",
+            "boss_outreach_pending_hr_text",
+            "boss_outreach_confirm_greeting",
+            "boss_outreach_confirm_reply",
+        ):
+            st.session_state.pop(key, None)
+
+    with st.expander("BOSS 沟通区", expanded=True):
+        st.caption("先生成草稿，再编辑确认；非 BOSS 或没有沟通链接时只生成文本。")
+        if not is_boss:
+            st.info("当前岗位不是 BOSS 岗位，只生成沟通文本。")
+        elif not chat_url:
+            st.info("当前 BOSS 岗位没有沟通链接，只生成沟通文本。")
+
+        match_payload = {
+            "job_decision": selected_job.get("job_decision", {}),
+            "ai_match": selected_job.get("ai_match", {}),
+            "resume_match": selected_job.get("resume_match", {}),
+        }
+        max_chars = st.number_input(
+            "打招呼字数上限",
+            min_value=20,
+            max_value=300,
+            value=normalize_max_chars(task.get("greeting_max_chars") or 100),
+            step=10,
+            key="boss_outreach_greeting_max",
+        )
+        custom_prompt = st.text_area(
+            "打招呼提示词边界",
+            value=task.get("greeting_prompt") or DEFAULT_GREETING_CONSTRAINT,
+            height=92,
+            key="boss_outreach_greeting_prompt",
+        )
+        if st.button("生成招呼语草稿", type="primary", key="boss_outreach_generate_greeting"):
+            draft = generate_boss_greeting(
+                selected_job,
+                profile,
+                match_payload,
+                max_chars=int(max_chars),
+                custom_prompt=custom_prompt,
+            )
+            st.session_state["boss_outreach_greeting_text"] = draft["message"]
+            save_outreach_record(
+                selected_job,
+                task_id=task_id,
+                action_type="greeting",
+                message_text=draft["message"],
+                max_chars=int(max_chars),
+                custom_prompt=custom_prompt,
+                status="drafted",
+                send_result=draft.get("source", ""),
+                platform_url=chat_url,
+            )
+            st.caption(f"草稿来源：{draft.get('source')}；字数：{len(draft['message'])}/{int(max_chars)}")
+        st.session_state.setdefault("boss_outreach_greeting_text", "")
+        greeting_text = st.text_area(
+            "最终招呼语",
+            height=104,
+            key="boss_outreach_greeting_text",
+        )
+        st.caption(f"当前字数：{len(greeting_text.strip())}/{int(max_chars)}")
+
+        greet_cols = st.columns([1, 1])
+        with greet_cols[0]:
+            if st.button("干跑检查", key="boss_outreach_dry_run", disabled=not (is_boss and chat_url), width="stretch"):
+                result = check_boss_chat(selected_job, dry_run=True)
+                save_outreach_record(
+                    selected_job,
+                    task_id=task_id,
+                    action_type="greeting",
+                    message_text=greeting_text,
+                    max_chars=int(max_chars),
+                    custom_prompt=custom_prompt,
+                    status=result.get("status", "dry_run"),
+                    send_result=result.get("status", ""),
+                    platform_url=result.get("platform_url", chat_url),
+                    error=result.get("error", ""),
+                )
+                _render_outreach_result(result)
+        with greet_cols[1]:
+            confirm_send = st.checkbox("确认发送这条招呼语", key="boss_outreach_confirm_greeting")
+            if st.button(
+                "发送到 BOSS",
+                key="boss_outreach_send_greeting",
+                disabled=not (is_boss and chat_url and greeting_text.strip() and confirm_send),
+                width="stretch",
+            ):
+                result = send_boss_message(selected_job, greeting_text, confirm_send=True)
+                save_outreach_record(
+                    selected_job,
+                    task_id=task_id,
+                    action_type="greeting",
+                    message_text=greeting_text,
+                    max_chars=int(max_chars),
+                    custom_prompt=custom_prompt,
+                    status=result.get("status", ""),
+                    send_result=result.get("status", ""),
+                    platform_url=result.get("platform_url", chat_url),
+                    error=result.get("error", ""),
+                )
+                _render_outreach_result(result)
+
+        st.divider()
+        st.markdown("**回复建议**")
+        if "boss_outreach_pending_hr_text" in st.session_state:
+            st.session_state["boss_outreach_hr_text"] = st.session_state.pop("boss_outreach_pending_hr_text")
+        st.session_state.setdefault("boss_outreach_hr_text", "")
+        reply_source = st.text_area(
+            "HR 消息或当前会话文本",
+            height=96,
+            key="boss_outreach_hr_text",
+        )
+        read_disabled = not (is_boss and chat_url)
+        read_cols = st.columns([1, 1])
+        with read_cols[0]:
+            if st.button("读取当前会话文本", key="boss_outreach_read_chat", disabled=read_disabled, width="stretch"):
+                result = read_boss_chat_text(selected_job)
+                if result.get("chat_text"):
+                    st.session_state["boss_outreach_pending_hr_text"] = result["chat_text"]
+                    st.rerun()
+                _render_outreach_result(result)
+        with read_cols[1]:
+            reply_max_chars = st.number_input(
+                "回复字数上限",
+                min_value=20,
+                max_value=300,
+                value=normalize_max_chars(120),
+                step=10,
+                key="boss_outreach_reply_max",
+            )
+        reply_prompt = st.text_area(
+            "回复提示词边界",
+            value=task.get("reply_prompt") or DEFAULT_REPLY_CONSTRAINT,
+            height=84,
+            key="boss_outreach_reply_prompt",
+        )
+        if st.button("生成回复建议", key="boss_outreach_generate_reply"):
+            draft = generate_boss_reply(
+                selected_job,
+                profile,
+                reply_source,
+                max_chars=int(reply_max_chars),
+                custom_prompt=reply_prompt,
+            )
+            st.session_state["boss_outreach_reply_text"] = draft["message"]
+            save_outreach_record(
+                selected_job,
+                task_id=task_id,
+                action_type="reply",
+                message_text=draft["message"],
+                max_chars=int(reply_max_chars),
+                custom_prompt=reply_prompt,
+                status="drafted",
+                send_result=draft.get("source", ""),
+                platform_url=chat_url,
+            )
+            st.caption(f"回复来源：{draft.get('source')}；字数：{len(draft['message'])}/{int(reply_max_chars)}")
+        st.session_state.setdefault("boss_outreach_reply_text", "")
+        reply_text = st.text_area(
+            "最终回复文本",
+            height=92,
+            key="boss_outreach_reply_text",
+        )
+        confirm_reply = st.checkbox("确认发送这条回复", key="boss_outreach_confirm_reply")
+        if st.button(
+            "发送回复到 BOSS",
+            key="boss_outreach_send_reply",
+            disabled=not (is_boss and chat_url and reply_text.strip() and confirm_reply),
+            width="stretch",
+        ):
+            result = send_boss_message(selected_job, reply_text, confirm_send=True)
+            save_outreach_record(
+                selected_job,
+                task_id=task_id,
+                action_type="reply",
+                message_text=reply_text,
+                max_chars=int(reply_max_chars),
+                custom_prompt=reply_prompt,
+                status=result.get("status", ""),
+                send_result=result.get("status", ""),
+                platform_url=result.get("platform_url", chat_url),
+                error=result.get("error", ""),
+            )
+            _render_outreach_result(result)
+
+
+def _render_outreach_result(result: dict):
+    status = result.get("status", "")
+    message = result.get("message", "")
+    if status in {"sent", "dry_run_ok", "ready", "read_ok"}:
+        st.success(message or status)
+    elif status in {"missing_chat_url", "confirm_required", "empty_message"}:
+        st.info(message or status)
+    else:
+        st.warning(message or status)
+    if result.get("error"):
+        st.caption(result.get("error"))
 
 
 def inject_design_system():
@@ -1467,17 +2230,26 @@ def auto_rank_jobs_if_needed(resume_text: str, jobs: list[dict], profile: dict, 
         sort_keys=True,
     )
     if st.session_state.get("local_match_signature") == signature and st.session_state.get("ranked_jobs"):
-        return st.session_state["ranked_jobs"]
+        return annotate_workspace_job_actions(st.session_state["ranked_jobs"])
     if st.session_state.get("deep_match_signature") == signature and st.session_state.get("ranked_jobs"):
-        return st.session_state["ranked_jobs"]
+        return annotate_workspace_job_actions(st.session_state["ranked_jobs"])
     ranked = rank_jobs_for_resume(resume_text, jobs, top_n=None, ai_top_n=0)
     ranked = rank_jobs_with_decisions(ranked, profile, plan or {})
+    ranked = annotate_workspace_job_actions(ranked)
     st.session_state["ranked_jobs"] = ranked
     st.session_state["current_jobs"] = ranked
     st.session_state["active_search_source"] = "matched"
     st.session_state["local_match_signature"] = signature
     st.session_state.setdefault("search_summary", {})["recommendation_level_counts"] = count_recommendation_levels(ranked)
     return ranked
+
+
+def annotate_workspace_job_actions(jobs: list[dict]) -> list[dict]:
+    return annotate_jobs_with_actions(
+        jobs,
+        feedback=load_job_feedback(limit=500),
+        applications=load_application_records(limit=500),
+    )
 
 
 def render_header(cfg: dict):
@@ -1516,10 +2288,534 @@ def render_stepper(has_resume: bool, has_plan: bool, has_jobs: bool, has_advice:
     st.markdown("".join(html), unsafe_allow_html=True)
 
 
+def render_workspace_app():
+    workspace_options = ["任务配置", "岗位结果", "沟通行动", "记录记忆"]
+    if st.session_state.get("career_workspace_v1") not in workspace_options:
+        st.session_state["career_workspace_v1"] = "任务配置"
+    workspace = st.segmented_control(
+        "工作区",
+        workspace_options,
+        key="career_workspace_v1",
+    )
+    st.caption("按流程切换工作区，当前页面只显示本阶段需要的控件。")
+
+    if workspace == "任务配置":
+        render_config_workspace()
+    elif workspace == "岗位结果":
+        render_results_workspace()
+    elif workspace == "沟通行动":
+        render_action_workspace()
+    else:
+        render_memory_workspace()
+
+
+def render_config_workspace():
+    platform_options = [
+        code for code in PLATFORM_ORDER
+        if code in PLATFORM_LABELS and code not in {"boss_drission", "boss_cookie"}
+    ]
+    left, right = st.columns([0.9, 1.45], gap="large")
+
+    with left:
+        with st.container(border=True):
+            st.markdown('<div class="cp-panel-title">简历与目标</div>', unsafe_allow_html=True)
+            uploaded = st.file_uploader(
+                "上传简历",
+                type=[ext.lstrip(".") for ext in sorted(SUPPORTED_EXTENSIONS)],
+                help="可选。上传后用于画像、匹配和话术证据。",
+                key="ws_resume_upload",
+            )
+            if uploaded:
+                resume_path = save_upload(uploaded)
+                try:
+                    resume_text = extract_resume_text(resume_path)
+                except Exception as exc:
+                    st.error(str(exc))
+                    return
+                if not resume_text.strip():
+                    st.error("没有从简历中解析出文字。")
+                    return
+                cache_key = resume_cache_key(uploaded, resume_text)
+                st.session_state["resume_text_current"] = resume_text
+                st.session_state["resume_text_hash"] = resume_text_hash(resume_text)
+                if st.session_state.get("resume_profile_key") != cache_key:
+                    with st.status("正在解析简历画像...", expanded=False) as status:
+                        profile = build_resume_profile(resume_text)
+                        st.session_state["resume_profile"] = profile
+                        st.session_state["resume_profile_key"] = cache_key
+                        status.update(label="简历画像已解析", state="complete")
+                st.success(f"已读取简历：{uploaded.name}")
+            elif st.session_state.get("resume_text_current"):
+                st.info("已保留本轮上传的简历画像。")
+            else:
+                st.markdown('<div class="cp-muted">可以先不上传简历，直接配置任务。</div>', unsafe_allow_html=True)
+
+            if st.session_state.get("resume_profile"):
+                with st.expander("简历画像", expanded=False):
+                    render_resume_profile_summary(st.session_state.get("resume_profile", {}))
+
+        with st.container(border=True):
+            st.markdown('<div class="cp-panel-title">快速 Agent 检索</div>', unsafe_allow_html=True)
+            default_goal = DEFAULT_AGENT_GOAL
+            if st.session_state.get("agent_goal") == OLD_DEFAULT_AGENT_GOAL:
+                st.session_state["agent_goal"] = default_goal
+            agent_goal = st.text_area(
+                "求职目标",
+                value=st.session_state.get("agent_goal", default_goal),
+                height=104,
+                key="ws_agent_goal",
+            )
+            allow_browser_login = st.checkbox(
+                "允许打开 Boss 登录浏览器",
+                value=False,
+                key="ws_allow_boss_browser_login",
+            )
+            if st.button("启动 Agent 检索", type="primary", width="stretch", key="ws_run_agent"):
+                st.session_state["agent_goal"] = agent_goal
+                with st.status("Agent 正在检索岗位...", expanded=True) as status:
+                    result = run_agent_search(
+                        agent_goal,
+                        st.session_state.get("resume_text_current") or None,
+                        allow_browser_login=allow_browser_login,
+                        progress_callback=make_status_progress(status),
+                    )
+                    status.update(label=f"Agent 检索完成，本次结果 {len(result.get('jobs', []))} 个", state="complete")
+                _store_agent_result_for_workspace(result)
+                st.session_state["career_workspace_v1"] = "岗位结果"
+                st.rerun()
+
+    with right:
+        with st.container(border=True):
+            render_outreach_task_panel(
+                st.session_state.get("resume_profile", {}),
+                platform_options=platform_options,
+                use_browser_crawlers=bool(st.session_state.get("ws_use_browser_crawlers", False)),
+                allow_browser_login=bool(st.session_state.get("ws_allow_boss_browser_login", False)),
+            )
+
+        with st.expander("手动搜索", expanded=False):
+            keyword = st.text_input("搜索关键词", value="AI Agent", key="ws_keyword")
+            city_col, page_col = st.columns(2)
+            with city_col:
+                location = st.text_input("城市", value="上海", key="ws_location")
+            with page_col:
+                max_pages = st.number_input("页数", min_value=1, max_value=10, value=2, key="ws_max_pages")
+            job_types = st.multiselect("岗位类型", ["社招", "校招", "实习"], default=["社招", "校招"], key="ws_job_types")
+            platforms = st.multiselect(
+                "招聘平台",
+                platform_options,
+                default=[p for p in DEFAULT_PLATFORM_CODES if p in platform_options],
+                key="ws_platforms",
+                format_func=platform_label,
+            )
+            use_browser_crawlers = st.checkbox("启用浏览器列表采集", value=False, key="ws_use_browser_crawlers")
+            min_salary_k, max_salary_k = st.slider("月薪范围（K）", 0, 100, (0, 20), key="ws_salary_range")
+            criteria = {
+                "job_types": job_types,
+                "min_salary_k": min_salary_k if min_salary_k > 0 else None,
+                "max_salary_k": max_salary_k if max_salary_k < 100 else None,
+                "degrees": ["不限", "大专", "本科", "硕士", "博士"],
+            }
+            signature = json.dumps({
+                "keyword": keyword,
+                "location": location,
+                "platforms": platforms,
+                "max_pages": int(max_pages),
+                "criteria": criteria,
+            }, ensure_ascii=False, sort_keys=True)
+            if st.button("按筛选检索", width="stretch", key="ws_manual_search"):
+                with st.status("正在检索岗位...", expanded=True) as status:
+                    jobs_found = run_search(
+                        keyword,
+                        location,
+                        platforms,
+                        max_pages,
+                        criteria,
+                        signature,
+                        expand_keywords=True,
+                        max_keywords=5,
+                        enrich_details=True,
+                        detail_limit=20,
+                        use_browser_crawlers=use_browser_crawlers,
+                        allow_browser_login=bool(st.session_state.get("ws_allow_boss_browser_login", False)),
+                        progress_callback=make_status_progress(status),
+                    )
+                    status.update(label=f"检索完成，本次结果 {len(jobs_found)} 个", state="complete")
+                st.session_state["career_workspace_v1"] = "岗位结果"
+                st.rerun()
+
+        with st.expander("导入岗位 JD / 链接", expanded=False):
+            with st.form("ws_import_job_form"):
+                title_col, company_col = st.columns(2)
+                with title_col:
+                    import_title = st.text_input("岗位名称", key="ws_import_title")
+                with company_col:
+                    import_company = st.text_input("公司名称", key="ws_import_company")
+                location_col, salary_col = st.columns(2)
+                with location_col:
+                    import_location = st.text_input("工作地点", key="ws_import_location")
+                with salary_col:
+                    import_salary = st.text_input("薪资", key="ws_import_salary")
+                import_url = st.text_input("岗位链接", key="ws_import_url")
+                import_fetch_url = st.checkbox("尝试读取链接内容", value=True, key="ws_import_fetch_url")
+                import_jd = st.text_area(
+                    "岗位 JD",
+                    height=180,
+                    key="ws_import_jd",
+                    placeholder="可以粘贴职位描述、任职要求、学历经验、福利等文本。",
+                )
+                submitted = st.form_submit_button("导入到当前结果", width="stretch")
+            if submitted:
+                if not any(value.strip() for value in (import_title, import_company, import_url, import_jd)):
+                    st.warning("请至少填写岗位名称、公司、链接或 JD 文本中的一项。")
+                else:
+                    if import_fetch_url and import_url.strip():
+                        with st.spinner("正在读取链接内容..."):
+                            imported_job = build_job_from_url(
+                                import_url,
+                                title=import_title,
+                                company=import_company,
+                                location=import_location,
+                                salary=import_salary,
+                                jd_text=import_jd,
+                            )
+                    else:
+                        imported_job = build_manual_job(
+                            title=import_title,
+                            company=import_company,
+                            location=import_location,
+                            salary=import_salary,
+                            jd_text=import_jd,
+                            url=import_url,
+                        )
+                    saved_job = save_imported_job(imported_job)
+                    add_imported_job_to_workspace(saved_job)
+                    st.success(f"已导入岗位：{saved_job.get('company', '')} {saved_job.get('title', '')}")
+                    st.session_state["career_workspace_v1"] = "岗位结果"
+                    st.rerun()
+
+
+def render_results_workspace():
+    jobs, db_jobs, summary = workspace_jobs()
+    st.markdown('<div class="cp-panel-title">岗位结果</div>', unsafe_allow_html=True)
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("当前结果", len(jobs))
+    metric_cols[1].metric("数据库岗位", len(db_jobs))
+    metric_cols[2].metric("原始候选", summary.get("search_raw_total", "-") if summary else "-")
+    metric_cols[3].metric("最终展示", summary.get("search_final_total", len(jobs)) if summary else len(jobs))
+
+    if st.session_state.get("last_search_label"):
+        st.caption(
+            f"{st.session_state.get('last_search_label')} / "
+            f"搜索时间：{st.session_state.get('search_time', '')}"
+        )
+    if summary:
+        with st.expander("搜索质量", expanded=False):
+            quality = summary.get("search_field_quality") or {}
+            if quality:
+                st.caption(
+                    f"字段质量均分：{quality.get('avg_score', 0)} / "
+                    f"高质量岗位：{quality.get('high_quality', 0)} / "
+                    f"总数：{quality.get('total', 0)}"
+                )
+            st.write("平台命中")
+            st.dataframe(pd.DataFrame(dict_to_rows(summary.get("search_final_platform_counts", {}))), hide_index=True, width="stretch")
+            job_quality = summary.get("search_job_quality") or {}
+            if job_quality:
+                st.write("岗位质量")
+                st.caption(
+                    f"置信度均分：{job_quality.get('avg_confidence', 0)} / "
+                    f"统计岗位：{job_quality.get('total', 0)}"
+                )
+                label_counts = job_quality.get("label_counts") or {}
+                if label_counts:
+                    st.dataframe(pd.DataFrame(dict_to_rows(label_counts)), hide_index=True, width="stretch")
+                field_confidence = job_quality.get("avg_field_confidence") or {}
+                if field_confidence:
+                    rows = [
+                        {"字段": key, "平均置信度": value}
+                        for key, value in field_confidence.items()
+                    ]
+                    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+            invalid = summary.get("search_invalid_jobs") or {}
+            if invalid.get("total"):
+                st.write("无效候选过滤")
+                st.caption(f"已过滤：{invalid.get('total', 0)}")
+                st.dataframe(pd.DataFrame(dict_to_rows(invalid.get("reason_counts", {}))), hide_index=True, width="stretch")
+            duplicate = summary.get("search_duplicate_summary") or {}
+            if duplicate.get("dropped"):
+                st.write("去重摘要")
+                st.caption(
+                    f"输入 {duplicate.get('input', 0)} / "
+                    f"保留 {duplicate.get('kept', 0)} / "
+                    f"去重 {duplicate.get('dropped', 0)}"
+                )
+                st.dataframe(pd.DataFrame(dict_to_rows(duplicate.get("reason_counts", {}))), hide_index=True, width="stretch")
+            st.caption(f"实际关键词：{', '.join(summary.get('search_keywords', []))}")
+
+    if not jobs:
+        st.warning("当前没有岗位结果。请先到“任务配置”工作区执行检索。")
+        return
+
+    if st.session_state.get("resume_text_current"):
+        render_match_dashboard_panel(jobs)
+
+    view_col, size_col = st.columns([1, 1])
+    with view_col:
+        result_view = st.segmented_control("结果视图", ["表格", "卡片"], default="表格", key="ws_result_view")
+    with size_col:
+        page_size = st.selectbox("每页数量", [10, 20, 30, 50], index=0, key="ws_result_page_size")
+    total_pages = max(1, (len(jobs) + int(page_size) - 1) // int(page_size))
+    page_num = st.number_input("页码", min_value=1, max_value=total_pages, value=1, key="ws_result_page")
+    start = (int(page_num) - 1) * int(page_size)
+    page_jobs = jobs[start:start + int(page_size)]
+    st.caption(f"第 {int(page_num)}/{total_pages} 页，共 {len(jobs)} 个岗位")
+    if result_view == "卡片":
+        render_job_cards(page_jobs, limit=len(page_jobs), show_recommendation=bool(st.session_state.get("resume_text_current")), start_index=start + 1)
+    else:
+        render_job_table(page_jobs, len(page_jobs), show_recommendation=bool(st.session_state.get("resume_text_current")))
+
+
+def render_match_dashboard_panel(jobs: list[dict]) -> None:
+    dashboard = build_match_dashboard(jobs)
+    with st.expander("匹配看板", expanded=True):
+        metric_cols = st.columns(4)
+        metric_cols[0].metric("已评估", dashboard.get("evaluated_count", 0))
+        metric_cols[1].metric("平均匹配分", dashboard.get("avg_score", 0))
+        metric_cols[2].metric("强/优先岗位", dashboard.get("high_match_count", 0))
+        metric_cols[3].metric("字段质量均分", dashboard.get("avg_field_quality", 0))
+
+        left, right = st.columns([1.25, 1], gap="large")
+        with left:
+            top_jobs = dashboard.get("top_jobs") or []
+            if top_jobs:
+                rows = [
+                    {
+                        "排名": item.get("rank"),
+                        "推荐": item.get("level"),
+                        "分数": item.get("score"),
+                        "公司": item.get("company"),
+                        "岗位": item.get("title"),
+                        "来源": platform_label(item.get("platform", "")),
+                        "命中": "；".join(item.get("matched_keywords") or []),
+                        "缺口": "；".join(item.get("missing_keywords") or []),
+                    }
+                    for item in top_jobs
+                ]
+                st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        with right:
+            level_counts = dashboard.get("level_counts") or {}
+            platform_counts = dashboard.get("platform_counts") or {}
+            if level_counts:
+                st.write("匹配等级")
+                st.dataframe(pd.DataFrame(dict_to_rows(level_counts)), hide_index=True, width="stretch")
+            if platform_counts:
+                st.write("平台分布")
+                st.dataframe(pd.DataFrame(dict_to_rows(platform_counts)), hide_index=True, width="stretch")
+            missing = dashboard.get("top_missing_keywords") or []
+            matched = dashboard.get("top_matched_keywords") or []
+            if matched:
+                st.caption(f"主要命中：{'、'.join(matched[:8])}")
+            if missing:
+                st.caption(f"主要缺口：{'、'.join(missing[:8])}")
+            actions = (dashboard.get("action_summary") or {}).get("status_counts") or {}
+            if actions:
+                st.write("动作状态")
+                st.dataframe(pd.DataFrame(dict_to_rows(actions)), hide_index=True, width="stretch")
+        st.download_button(
+            "下载匹配看板 JSON",
+            json.dumps(dashboard, ensure_ascii=False, indent=2),
+            file_name="careerpilot_match_dashboard.json",
+            mime="application/json",
+            width="stretch",
+        )
+
+
+def render_action_workspace():
+    jobs, _, _ = workspace_jobs()
+    ranked = st.session_state.get("ranked_jobs", [])
+    source_jobs = ranked or jobs
+    if not source_jobs:
+        st.warning("还没有岗位可选。请先到“任务配置”或“岗位结果”工作区完成检索。")
+        return
+
+    st.markdown('<div class="cp-panel-title">沟通行动</div>', unsafe_allow_html=True)
+    labels = [
+        f"{i+1}. {job.get('company', '')} - {job.get('title', '')} ({job.get('location', '')})"
+        for i, job in enumerate(source_jobs)
+    ]
+    selected_idx = st.selectbox("选择目标岗位", range(len(source_jobs)), format_func=lambda i: labels[i], key="ws_action_job_idx")
+    selected_job = source_jobs[selected_idx]
+    local_profile = st.session_state.get("resume_profile") or {}
+
+    top, side = st.columns([1.35, 1], gap="large")
+    with top:
+        with st.expander("匹配结论", expanded=True):
+            render_match_summary(selected_job)
+        with st.expander("岗位详情", expanded=False):
+            render_job_detail_summary(selected_job)
+        with st.expander("本地行动建议", expanded=True):
+            st.markdown(build_local_job_advice(selected_job, local_profile))
+        render_boss_outreach_panel(selected_job, local_profile, st.session_state.get("active_outreach_task"))
+
+    with side:
+        resume_text = st.session_state.get("resume_text_current", "")
+        with st.container(border=True):
+            st.markdown('<div class="cp-panel-title">简历匹配与材料</div>', unsafe_allow_html=True)
+            if not resume_text:
+                st.markdown('<div class="cp-muted">上传简历后可生成简历优化、JD 差距和面试准备包。</div>', unsafe_allow_html=True)
+            else:
+                ai_top_n = st.selectbox("DeepSeek 精排数量", [0, 3, 5, 10], index=1, key="ws_ai_top_n")
+                if st.button("精排当前结果", type="primary", width="stretch", key="ws_deep_match"):
+                    with st.status("正在精排当前岗位...", expanded=True) as status:
+                        ranked_jobs = rank_jobs_for_resume(
+                            resume_text,
+                            jobs,
+                            top_n=None,
+                            ai_top_n=int(ai_top_n),
+                            progress_callback=make_status_progress(status),
+                            resume_cache_key=st.session_state.get("resume_text_hash"),
+                        )
+                        ranked_jobs = rank_jobs_with_decisions(ranked_jobs, local_profile, (st.session_state.get("agent_result") or {}).get("plan", {}))
+                        ranked_jobs = annotate_workspace_job_actions(ranked_jobs)
+                        st.session_state["ranked_jobs"] = ranked_jobs
+                        st.session_state["current_jobs"] = ranked_jobs
+                        status.update(label="精排完成", state="complete")
+                    st.rerun()
+                if st.button("生成简历优化建议", width="stretch", key="ws_generate_advice"):
+                    with st.spinner("正在生成建议..."):
+                        st.session_state["advice"] = generate_resume_job_advice(resume_text, selected_job)
+                if st.button("生成 JD 差距分析", width="stretch", key="ws_generate_gap"):
+                    with st.spinner("正在生成差距分析..."):
+                        st.session_state["gap_analysis"] = generate_job_gap_analysis(resume_text, selected_job)
+                if st.button("生成面试准备包", width="stretch", key="ws_generate_pack"):
+                    with st.spinner("正在生成面试准备包..."):
+                        st.session_state["interview_pack"] = generate_interview_pack(resume_text, selected_job)
+
+        for title, key in (("简历优化建议", "advice"), ("JD 差距分析", "gap_analysis"), ("面试准备包", "interview_pack")):
+            if st.session_state.get(key):
+                with st.expander(title, expanded=False):
+                    st.markdown(st.session_state[key])
+
+
+def render_memory_workspace():
+    jobs, _, summary = workspace_jobs()
+    agent_result = st.session_state.get("agent_result")
+    left, right = st.columns([1.2, 1], gap="large")
+    with left:
+        with st.container(border=True):
+            st.markdown('<div class="cp-panel-title">Agent 解释</div>', unsafe_allow_html=True)
+            if agent_result:
+                st.info(agent_result.get("agent_message", ""))
+                render_agent_trace(agent_result, agent_result.get("summary", {}) or summary, jobs)
+                if agent_result.get("report"):
+                    st.download_button("下载 Agent 报告", agent_result["report"], file_name="CareerPilot_agent_search_report.md", width="stretch")
+                with st.expander("搜索计划", expanded=False):
+                    render_agent_plan_summary(agent_result.get("plan", {}))
+            else:
+                st.markdown('<div class="cp-empty">还没有 Agent 任务记录。</div>', unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown('<div class="cp-panel-title">Agent 问答</div>', unsafe_allow_html=True)
+            question = st.text_input("问当前搜索结果", key="ws_agent_question", disabled=not bool(agent_result))
+            if st.button("询问 Agent", width="stretch", disabled=not bool(agent_result), key="ws_ask_agent") and question.strip():
+                answer = answer_agent_question(question, agent_result)
+                st.session_state.setdefault("agent_chat", []).append({"question": question, "answer": answer})
+            for item in st.session_state.get("agent_chat", [])[-5:]:
+                st.markdown(f"**你：** {item['question']}")
+                st.markdown(item["answer"])
+    with right:
+        with st.container(border=True):
+            st.markdown('<div class="cp-panel-title">记录与记忆</div>', unsafe_allow_html=True)
+            runs = load_agent_runs(limit=8)
+            if runs:
+                st.dataframe(pd.DataFrame([
+                    {
+                        "任务ID": item.get("run_id", ""),
+                        "状态": item.get("status", ""),
+                        "岗位数": int(item.get("job_count") or 0),
+                        "更新时间": item.get("updated_at", ""),
+                    }
+                    for item in runs
+                ]), width="stretch", hide_index=True)
+            memory_snapshot = export_memory_snapshot()
+            st.caption(
+                f"反馈 {len(memory_snapshot.get('job_feedback', []))} / "
+                f"投递 {len(memory_snapshot.get('applications', []))} / "
+                f"搜索 {len(memory_snapshot.get('search_history', []))}"
+            )
+            st.download_button(
+                "下载求职记忆",
+                json.dumps(memory_snapshot, ensure_ascii=False, indent=2),
+                file_name="CareerPilot_memory_snapshot.json",
+                width="stretch",
+            )
+
+
+def workspace_jobs() -> tuple[list[dict], list[dict], dict]:
+    db_jobs = load_jobs()
+    current_jobs = st.session_state.get("current_jobs")
+    summary = st.session_state.get("search_summary", {}) or {}
+    if current_jobs is not None:
+        display_platforms = st.session_state.get("result_display_platforms") or st.session_state.get("task_platforms") or DEFAULT_PLATFORM_CODES
+        display_location = st.session_state.get("result_display_location")
+        display_criteria = st.session_state.get("result_display_criteria") or st.session_state.get("task_criteria") or {}
+        jobs = prepare_jobs_for_display(
+            current_jobs,
+            selected_platforms=display_platforms,
+            location=display_location,
+            criteria=display_criteria,
+            already_filtered=True,
+        )
+    else:
+        jobs = prepare_jobs_for_display(
+            db_jobs,
+            selected_platforms=DEFAULT_PLATFORM_CODES,
+            location="上海",
+            criteria={"job_types": ["社招", "校招"], "max_salary_k": 20, "max_experience_years": 1},
+            already_filtered=False,
+        )
+    resume_text = st.session_state.get("resume_text_current", "")
+    if resume_text.strip() and jobs and st.session_state.get("resume_profile"):
+        jobs = auto_rank_jobs_if_needed(
+            resume_text,
+            jobs,
+            st.session_state.get("resume_profile", {}),
+            (st.session_state.get("agent_result") or {}).get("plan", {}),
+        )
+        if st.session_state.get("active_search_source") == "task":
+            jobs = apply_task_match_threshold(jobs, st.session_state.get("active_outreach_task"))
+    return jobs, db_jobs, summary
+
+
+def _store_agent_result_for_workspace(result: dict) -> None:
+    st.session_state["agent_result"] = result
+    st.session_state["current_jobs"] = result.get("jobs", [])
+    st.session_state["search_summary"] = result.get("summary", {})
+    st.session_state["search_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    st.session_state["active_search_source"] = "agent"
+    plan = result.get("plan", {})
+    st.session_state["result_display_platforms"] = plan.get("platforms") or DEFAULT_PLATFORM_CODES
+    st.session_state["result_display_location"] = plan.get("location")
+    st.session_state["result_display_criteria"] = plan.get("criteria") or {}
+    st.session_state["last_search_label"] = (
+        f"{plan.get('location', '')} / {plan.get('keyword', '')} / "
+        f"平台:{platform_label_text(plan.get('platforms', []))} / "
+        f"页数:{int(plan.get('max_pages') or 1)} / "
+        f"类型:{', '.join(plan.get('job_types', []))}"
+    )
+    if result.get("resume_profile"):
+        st.session_state["resume_profile"] = result["resume_profile"]
+    clear_search_outputs()
+    reset_result_pagination()
+    load_jobs.clear()
+
+
 def main():
     inject_design_system()
     cfg = get_llm_config()
     render_header(cfg)
+    render_workspace_app()
+    return
 
     uploaded = None
     resume_text = ""
@@ -1734,6 +3030,14 @@ def main():
                     status.update(label=f"检索完成，本次结果 {len(jobs_found)} 个", state="complete")
                 st.success(f"检索完成，本次结果 {len(jobs_found)} 个")
 
+        with st.container(border=True):
+            render_outreach_task_panel(
+                st.session_state.get("resume_profile", {}),
+                platform_options=platform_options,
+                use_browser_crawlers=use_browser_crawlers,
+                allow_browser_login=allow_browser_login,
+            )
+
     if run_agent:
         st.session_state["agent_goal"] = agent_goal
         with st.status("Agent 正在制定搜索计划并检索岗位...", expanded=True) as status:
@@ -1769,11 +3073,20 @@ def main():
     db_jobs = load_jobs()
     current_jobs = st.session_state.get("current_jobs")
     if current_jobs is not None:
+        if st.session_state.get("active_search_source") == "task":
+            active_task = st.session_state.get("active_outreach_task") or {}
+            display_platforms = st.session_state.get("task_platforms") or task_platforms(active_task)
+            display_location = None
+            display_criteria = st.session_state.get("task_criteria") or task_criteria(active_task)
+        else:
+            display_platforms = platforms
+            display_location = location
+            display_criteria = criteria
         jobs = prepare_jobs_for_display(
             current_jobs,
-            selected_platforms=platforms,
-            location=location,
-            criteria=criteria,
+            selected_platforms=display_platforms,
+            location=display_location,
+            criteria=display_criteria,
             already_filtered=True,
         )
     else:
@@ -1794,6 +3107,8 @@ def main():
                 profile_for_match,
                 (agent_result or {}).get("plan", {}),
             )
+        if st.session_state.get("active_search_source") == "task":
+            jobs = apply_task_match_threshold(jobs, st.session_state.get("active_outreach_task"))
 
     with center_col:
         render_stepper(
@@ -1943,9 +3258,31 @@ def main():
         st.markdown('<div class="cp-panel-title">简历匹配与行动</div>', unsafe_allow_html=True)
         if not uploaded:
             st.markdown(
-                '<div class="cp-empty">上传简历后，这里会开放岗位匹配、单岗位简历优化、面试建议和简历解析。</div>',
+                '<div class="cp-empty">上传简历后，这里会开放岗位匹配、简历优化、面试建议和简历解析；未上传简历时仍可选择岗位生成 BOSS 沟通草稿。</div>',
                 unsafe_allow_html=True,
             )
+            if jobs:
+                labels = [
+                    f"{i+1}. {j.get('company', '')} - {j.get('title', '')} ({j.get('location', '')})"
+                    for i, j in enumerate(jobs)
+                ]
+                selected_idx = st.selectbox(
+                    "选择目标岗位",
+                    range(len(jobs)),
+                    format_func=lambda i: labels[i],
+                    key="selected_job_idx_no_resume",
+                )
+                selected_job = jobs[selected_idx]
+                with st.expander("岗位详情", expanded=False):
+                    render_job_detail_summary(selected_job)
+                local_profile = st.session_state.get("resume_profile") or {}
+                with st.expander("本地行动建议", expanded=True):
+                    st.markdown(build_local_job_advice(selected_job, local_profile))
+                render_boss_outreach_panel(
+                    selected_job,
+                    local_profile,
+                    st.session_state.get("active_outreach_task"),
+                )
         else:
             tab_match, tab_advice, tab_resume = st.tabs(["岗位匹配", "行动建议", "简历解析"])
 
@@ -1983,6 +3320,7 @@ def main():
                         )
                         profile = st.session_state.get("resume_profile") or build_resume_profile(resume_text)
                         ranked = rank_jobs_with_decisions(ranked, profile, (agent_result or {}).get("plan", {}))
+                        ranked = annotate_workspace_job_actions(ranked)
                         st.session_state["resume_profile"] = profile
                         st.session_state["ranked_jobs"] = ranked
                         st.session_state["current_jobs"] = ranked
@@ -2046,6 +3384,12 @@ def main():
                             local_advice,
                             file_name="CareerPilot_local_job_advice.md",
                         )
+
+                    render_boss_outreach_panel(
+                        selected_job,
+                        local_profile,
+                        st.session_state.get("active_outreach_task"),
+                    )
 
                     col_status, col_note = st.columns([1, 2])
                     with col_status:

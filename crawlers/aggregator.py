@@ -19,6 +19,8 @@ from typing import Callable, Literal
 
 import db
 from job_filters import enrich_job_fields, filter_jobs
+from job_quality import apply_quality_control, filter_invalid_jobs, summarize_job_quality
+from job_schema import apply_job_schema
 from platform_registry import DEFAULT_PLATFORM_CODES, normalize_platforms
 
 logger = logging.getLogger(__name__)
@@ -84,6 +86,7 @@ def collect_all_jobs(
     )
     platform_fetch_counts: Counter[str] = Counter()
     platform_merged_counts: Counter[str] = Counter()
+    platform_duplicate_summaries: dict[str, dict] = {}
     keyword_fetch_counts: dict[str, int] = {}
 
     for platform_index, platform in enumerate(platforms):
@@ -132,7 +135,8 @@ def collect_all_jobs(
                     time.sleep(random.uniform(1.8, 3.8))
 
         if platform_jobs:
-            platform_jobs = _deduplicate(platform_jobs)
+            platform_jobs, platform_dedupe = _deduplicate_with_report(platform_jobs)
+            platform_duplicate_summaries[str(platform)] = platform_dedupe
         platform_merged_counts[str(platform)] = len(platform_jobs)
         logger.info("[%s] merged %d jobs from %d keywords", platform, len(platform_jobs), len(keywords))
         _emit_progress(progress_callback, f"{platform} 合并去重后 {len(platform_jobs)} 个候选")
@@ -153,9 +157,20 @@ def collect_all_jobs(
         all_jobs = enrich_job_details(all_jobs, limit=detail_limit)
     for job in all_jobs:
         enrich_job_fields(job)
-    _emit_progress(progress_callback, f"开始按岗位类型、薪资、学历、经验等条件筛选 {len(all_jobs)} 个候选")
-    filtered = filter_jobs(all_jobs, criteria)
-    deduped = _deduplicate(filtered)
+        apply_job_schema(job)
+        apply_quality_control(job)
+    valid_jobs, invalid_summary = filter_invalid_jobs(all_jobs)
+    if invalid_summary.get("total"):
+        _emit_progress(progress_callback, f"已过滤 {invalid_summary.get('total')} 个无效候选")
+    _emit_progress(progress_callback, f"开始按岗位类型、薪资、学历、经验等条件筛选 {len(valid_jobs)} 个候选")
+    filtered = filter_jobs(valid_jobs, criteria)
+    for job in filtered:
+        apply_job_schema(job)
+        apply_quality_control(job)
+    deduped, final_duplicate_summary = _deduplicate_with_report(filtered)
+    for job in deduped:
+        apply_job_schema(job)
+        apply_quality_control(job)
     _emit_progress(progress_callback, f"筛选后 {len(filtered)} 个，最终去重展示 {len(deduped)} 个")
     platform_final_counts = Counter(job.get("platform", "unknown") for job in deduped)
     platform_filtered_counts = Counter(job.get("platform", "unknown") for job in filtered)
@@ -169,14 +184,20 @@ def collect_all_jobs(
         "search_keyword_fetch_counts": keyword_fetch_counts,
         "search_platform_fetch_counts": dict(platform_fetch_counts),
         "search_platform_merged_counts": dict(platform_merged_counts),
+        "search_platform_duplicate_summaries": platform_duplicate_summaries,
         "search_raw_platform_counts": dict(platform_raw_counts),
         "search_filtered_platform_counts": dict(platform_filtered_counts),
         "search_final_platform_counts": dict(platform_final_counts),
         "search_type_counts": dict(type_counts),
         "search_filtered_type_counts": dict(type_filtered_counts),
         "search_field_counts": field_counts,
+        "search_field_quality": _field_quality_summary(deduped),
+        "search_job_quality": summarize_job_quality(deduped),
+        "search_invalid_jobs": invalid_summary,
+        "search_duplicate_summary": final_duplicate_summary,
         "search_detail_counts": dict(detail_counts),
         "search_raw_total": len(all_jobs),
+        "search_valid_total": len(valid_jobs),
         "search_filtered_total": len(filtered),
         "search_final_total": len(deduped),
         "criteria": criteria,
@@ -422,9 +443,15 @@ def _fetch_boss_with_fallback(
 
 def _deduplicate(jobs: list[dict]) -> list[dict]:
     """Remove exact duplicates without hiding the same role on other platforms."""
+    return _deduplicate_with_report(jobs)[0]
+
+
+def _deduplicate_with_report(jobs: list[dict]) -> tuple[list[dict], dict]:
+    """Remove duplicates and return a compact reason summary."""
     seen_ids: set[str] = set()
     seen_fingerprints: set[str] = set()
     unique: list[dict] = []
+    reason_counts: Counter[str] = Counter()
 
     for job in jobs:
         platform = _normalize_key(job.get("platform", ""))
@@ -433,8 +460,10 @@ def _deduplicate(jobs: list[dict]) -> list[dict]:
         key_fp = _job_fingerprint(job)
 
         if key_id and key_id in seen_ids:
+            reason_counts["same_platform_job_id"] += 1
             continue
         if key_fp and key_fp in seen_fingerprints:
+            reason_counts["same_platform_fingerprint"] += 1
             continue
 
         if key_id:
@@ -443,7 +472,12 @@ def _deduplicate(jobs: list[dict]) -> list[dict]:
             seen_fingerprints.add(key_fp)
         unique.append(job)
 
-    return unique
+    return unique, {
+        "input": len(jobs),
+        "kept": len(unique),
+        "dropped": len(jobs) - len(unique),
+        "reason_counts": dict(reason_counts),
+    }
 
 
 def _job_fingerprint(job: dict) -> str:
@@ -494,6 +528,8 @@ def _store_jobs(jobs: list[dict]) -> list[dict]:
     stored = []
     for job in jobs:
         enrich_job_fields(job)
+        apply_job_schema(job)
+        apply_quality_control(job)
         row_id = db.insert_job(
             platform=job.get("platform", "unknown"),
             title=job.get("title", ""),
@@ -530,3 +566,17 @@ def _store_jobs(jobs: list[dict]) -> list[dict]:
         stored.append(job)
 
     return stored
+
+
+def _field_quality_summary(jobs: list[dict]) -> dict[str, float | int]:
+    scores = [
+        float(job.get("field_quality_score") or 0)
+        for job in jobs
+    ]
+    if not scores:
+        return {"avg_score": 0.0, "high_quality": 0, "total": 0}
+    return {
+        "avg_score": round(sum(scores) / len(scores), 1),
+        "high_quality": sum(1 for score in scores if score >= 75),
+        "total": len(scores),
+    }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from uuid import uuid4
 
 from platform_registry import DEFAULT_PLATFORM_CODES, PLATFORM_ALIASES
 
@@ -78,6 +79,47 @@ def build_search_plan(goal_text: str, resume_profile: dict | None = None) -> dic
     }
 
 
+def build_outreach_task_from_text(goal_text: str, resume_profile: dict | None = None) -> dict:
+    """Create an editable local outreach task draft from natural language."""
+    text = _normalize(goal_text)
+    plan = build_search_plan(goal_text, resume_profile)
+    cities = _extract_all_locations(text)
+    max_chars = _extract_message_max_chars(text)
+    match_threshold = _extract_match_threshold(text)
+    regex_include = _extract_regex_include(text)
+    regex_exclude = _extract_regex_exclude(text)
+    task_id = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
+    keyword = plan.get("keyword") or "AI Agent"
+
+    return {
+        "task_id": task_id,
+        "name": _task_name(keyword, cities),
+        "natural_text": goal_text.strip(),
+        "keyword": keyword,
+        "search_text": keyword,
+        "expanded_keywords": plan.get("expanded_keywords") or [keyword],
+        "location": cities[0] if cities else plan.get("location", DEFAULT_LOCATION),
+        "cities": cities or [plan.get("location", DEFAULT_LOCATION)],
+        "cities_text": " ".join(cities or [plan.get("location", DEFAULT_LOCATION)]),
+        "platforms": plan.get("platforms") or list(DEFAULT_PLATFORM_CODES),
+        "max_pages": int(plan.get("max_pages") or DEFAULT_MAX_PAGES),
+        "criteria": plan.get("criteria") or {},
+        "job_types": plan.get("job_types") or DEFAULT_JOB_TYPES,
+        "ai_filter_text": _extract_ai_filter_text(goal_text),
+        "regex_include": regex_include,
+        "regex_exclude": regex_exclude,
+        "match_threshold": match_threshold,
+        "greeting_max_chars": max_chars,
+        "greeting_prompt": _extract_greeting_prompt(goal_text),
+        "reply_prompt": "",
+        "only_active_hr": _extract_only_active_hr(text),
+        "job_kind": "全职" if "全职" in text else "",
+        "send_limit": 1,
+        "plan": plan,
+        "notes": _task_notes(plan, cities, regex_include, regex_exclude),
+    }
+
+
 def _extract_keyword(text: str, resume_profile: dict) -> str:
     for keyword, triggers in ROLE_KEYWORDS:
         if any(trigger.lower() in text.lower() for trigger in triggers):
@@ -125,6 +167,14 @@ def _extract_location(text: str) -> str:
         if city in text:
             return city
     return DEFAULT_LOCATION
+
+
+def _extract_all_locations(text: str) -> list[str]:
+    cities = []
+    for city in CITY_NAMES:
+        if city in text and city not in cities:
+            cities.append(city)
+    return cities
 
 
 def _extract_job_types(text: str) -> list[str]:
@@ -288,6 +338,99 @@ def _extract_max_pages(text: str) -> int:
     if not match:
         return DEFAULT_MAX_PAGES
     return max(1, min(int(match.group(1)), 10))
+
+
+def _extract_message_max_chars(text: str) -> int:
+    match = re.search(r"(\d{2,3})\s*(?:字|个字)(?:以内|以下|内)?", text)
+    if not match:
+        return 100
+    return max(20, min(300, int(match.group(1))))
+
+
+def _extract_match_threshold(text: str) -> int:
+    match = re.search(r"(?:匹配度|匹配分|推荐分)\s*(?:>=|大于|高于|不低于|至少)?\s*(\d{2,3})", text)
+    if not match:
+        return 70
+    return max(0, min(100, int(match.group(1))))
+
+
+def _extract_only_active_hr(text: str) -> bool:
+    lower = text.lower()
+    compact = re.sub(r"\s+", "", lower)
+    return any(token in compact for token in ("只投活跃hr", "活跃hr", "在线hr"))
+
+
+def _extract_regex_include(text: str) -> str:
+    patterns = (
+        r"(?:职位名称|岗位名称|标题)(?:带有|包含|含有)([^，。；;]{1,40})",
+        r"(?:只看|筛选)(?:包含|带有)([^，。；;]{1,40})(?:的)?(?:岗位|职位)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return _clean_rule_text(match.group(1))
+    return ""
+
+
+def _extract_regex_exclude(text: str) -> str:
+    patterns = (
+        r"(?:职位名称|岗位名称|标题)(?:不要|不含|排除)([^，。；;]{1,40})",
+        r"(?:不要|不看|排除)([^，。；;]{1,40})(?:岗位|职位)?",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            value = _clean_rule_text(match.group(1))
+            if value and value not in ("实习", "校招", "外包", "培训"):
+                return value
+    return ""
+
+
+def _extract_ai_filter_text(goal_text: str) -> str:
+    text = str(goal_text or "").strip()
+    if not text:
+        return ""
+    hints = []
+    for token in ("本科", "薪资", "活跃", "全职", "双休", "不要", "不提", "突出", "介绍", "RAG", "大模型", "AI"):
+        if token in text:
+            hints.append(token)
+    return text if hints else ""
+
+
+def _extract_greeting_prompt(goal_text: str) -> str:
+    text = str(goal_text or "").strip()
+    constraints = []
+    for pattern in (
+        r"(\d{2,3}\s*(?:字|个字)(?:以内|以下|内)?)",
+        r"(突出[^，。；;]{1,50})",
+        r"(介绍[^，。；;]{1,50})",
+        r"(不提[^，。；;]{1,50})",
+        r"(不要[^，。；;]{1,50})",
+        r"(语气[^，。；;]{1,50})",
+    ):
+        constraints.extend(match.group(1).strip() for match in re.finditer(pattern, text))
+    return "；".join(_unique_nonempty(constraints))
+
+
+def _clean_rule_text(value: str) -> str:
+    text = str(value or "").strip()
+    for token in ("的", "岗位", "职位", "工作"):
+        text = text.replace(token, "")
+    return text.strip(" ，。；;")
+
+
+def _task_name(keyword: str, cities: list[str]) -> str:
+    city_text = "/".join(cities[:3]) if cities else DEFAULT_LOCATION
+    return f"{city_text} {keyword}".strip()
+
+
+def _task_notes(plan: dict, cities: list[str], regex_include: str, regex_exclude: str) -> list[str]:
+    notes = list(plan.get("notes") or [])
+    if len(cities) > 1:
+        notes.append("已识别多个城市；当前执行会按城市逐个检索并合并结果。")
+    if regex_include or regex_exclude:
+        notes.append("正则/关键词过滤会作用于岗位标题、公司、技能、JD 和要求字段。")
+    return notes
 
 
 def _build_notes(text: str, job_types: list[str], criteria: dict, platforms: list[str]) -> list[str]:

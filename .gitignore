@@ -2,8 +2,10 @@ __pycache__/
 *.pyc
 *.pyo
 .DS_Store
+.idea/
 venv/
 .venv/
+node_modules/
 .env
 *.egg-info/
 dist/
