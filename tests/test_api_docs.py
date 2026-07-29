@@ -32,6 +32,20 @@ class ApiDocsTest(unittest.TestCase):
             with self.subTest(title=title):
                 self.assertIn(title, text)
 
+    def test_readme_mentions_runnable_product_surfaces(self):
+        text = Path("README.md").read_text(encoding="utf-8")
+
+        for item in (
+            "Streamlit 求职工作台",
+            "FastAPI 本地接口",
+            "Vite + Vue 独立 Web 前端",
+            "Chrome / Edge 插件",
+            "POST http://127.0.0.1:8000/jobs/search",
+            "http://127.0.0.1:5173",
+        ):
+            with self.subTest(item=item):
+                self.assertIn(item, text)
+
 
 if __name__ == "__main__":
     unittest.main()

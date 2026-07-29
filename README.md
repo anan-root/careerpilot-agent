@@ -2,17 +2,26 @@
 
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?labelColor=2b2b2b&logo=python&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.36%2B-FF4B4B?labelColor=2b2b2b&logo=streamlit&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-local_API-009688?labelColor=2b2b2b&logo=fastapi&logoColor=white)
+![Vue](https://img.shields.io/badge/Vue-3.5-42B883?labelColor=2b2b2b&logo=vue.js&logoColor=white)
+![Vite](https://img.shields.io/badge/Vite-7-646CFF?labelColor=2b2b2b&logo=vite&logoColor=white)
 ![DeepSeek](https://img.shields.io/badge/DeepSeek-API-0B5FFF?labelColor=2b2b2b)
 ![SQLite](https://img.shields.io/badge/SQLite-local-4479A1?labelColor=2b2b2b&logo=sqlite&logoColor=white)
 ![pandas](https://img.shields.io/badge/pandas-2.1%2B-150458?labelColor=2b2b2b&logo=pandas&logoColor=white)
 ![DrissionPage](https://img.shields.io/badge/DrissionPage-4.1%2B-0E8A16?labelColor=2b2b2b)
-![status](https://img.shields.io/badge/status-MVP-007ACC?labelColor=2b2b2b)
+![status](https://img.shields.io/badge/status-local_product-007ACC?labelColor=2b2b2b)
 
-CareerPilot Agent 是一个面向中文招聘市场的个人求职智能体原型。它围绕“上传简历、说出目标、规划搜索、采集岗位、匹配简历、解释推荐、生成面试建议、沉淀求职记忆”这一条主流程，帮助求职者把多个招聘平台和简历文档里的信息收束到一个本地工作台。
+CareerPilot Agent 是一个面向中文招聘市场的个人求职工作台。它围绕“上传简历、说出目标、规划搜索、采集岗位、匹配简历、解释推荐、记录投递、沉淀求职记忆”这一条主流程，把多个招聘平台和简历文档里的信息收束到一个本地产品原型里。
 
-本项目当前定位为个人项目 / 本地 MVP / GitHub 展示系统：适合用于流程验证、AI 应用工程化练习和面试项目展示，不建议包装成已经大规模生产落地的招聘平台或自动投递系统。
+项目当前已经形成五个可运行入口：
 
-> 使用说明：默认目标场景为上海 / AI Agent、RAG、大模型应用方向；社招和校招可选，默认排除实习。交互式招聘平台页面默认不自动打开，需要时由用户手动开启。
+- `app.py`：Streamlit 求职工作台，覆盖任务配置、岗位结果、沟通行动和记录记忆。
+- `api.py`：FastAPI 本地接口，供插件、脚本和独立前端调用。
+- `frontend/`：Vite + Vue 独立 Web 前端，覆盖岗位采集、导入、匹配和动作记录。
+- `browser_extension/`：Chrome / Edge 插件雏形，用于从岗位详情页导入当前页面。
+- `cli.py`：命令行入口，支持 Agent 搜索、岗位采集、导入、匹配和报告导出。
+
+> 默认目标场景为上海 / AI Agent、RAG、大模型应用方向；社招和校招可选，默认排除实习。交互式招聘平台页面默认不自动打开，需要时由用户手动开启。
 
 > 仓库说明：本地配置、运行资料、生成报告和个人求职记录只作为本地演示资料使用，公开仓库只保留源码、文档和示例配置。
 
@@ -26,7 +35,7 @@ CareerPilot Agent 是一个面向中文招聘市场的个人求职智能体原�
 - 多平台采集岗位：默认展示 BOSS直聘、智联招聘、前程无忧；也可手动选择猎聘、拉勾、牛客网、应届生、国聘网、丁香人才网、就业在线等平台。
 - 支持外部岗位导入：可以在前端粘贴 JD、填写岗位链接，或让系统尝试读取链接页面正文后统一入库。
 - 导入岗位会根据链接识别 BOSS、智联、前程无忧、猎聘等来源，并尽量抽取岗位、公司、地点和薪资字段。
-- 提供本地 FastAPI 接口：`/jobs/import` 可供浏览器插件、脚本或后续前端调用。
+- 提供本地 FastAPI 接口：`/jobs/search`、`/jobs/import`、`/jobs/match` 可供浏览器插件、脚本或独立前端调用。
 - 提供浏览器插件雏形：用户在岗位详情页点击插件，将当前页文本导入本地 CareerPilot，也可以先收藏岗位。
 - 提供岗位动作 API：收藏、反馈、投递状态和动作记录可通过本地 API 写入求职记忆。
 - 默认看社招和校招，排除实习；也可以手动选择只看社招、校招或实习。
@@ -60,7 +69,7 @@ CareerPilot Agent 是一个面向中文招聘市场的个人求职智能体原�
 | 数据质量 | 只返回结果 | 解释平台数量、字段完整度、详情抓取限制 |
 | 记忆能力 | 一次性搜索 | 搜索历史、反馈、投递状态、运行报告 |
 | 沟通动作 | 用户自行复制话术 | 先生成草稿，用户确认后再执行单岗位 BOSS 沟通 |
-| 安全策略 | 可能自动打开浏览器 | Boss 登录浏览器默认关闭，需要时手动开启 |
+| 运行边界 | 可能自动打开浏览器 | Boss 登录浏览器默认关闭，需要时手动开启 |
 
 ## 快速开始
 
@@ -94,7 +103,7 @@ PowerShell 设置环境变量示例：
 $env:DEEPSEEK_API_KEY="你的 DeepSeek API Key"
 ```
 
-### 3. 启动前端
+### 3. 启动 Streamlit 工作台
 
 ```powershell
 streamlit run app.py
@@ -116,7 +125,7 @@ streamlit run app.py
 - 岗位结果分页：默认每页 10 条，可切换页码和每页数量。
 - 开发者调试信息：默认关闭，只在排查时查看原始结构化 JSON。
 
-### 4. 启动本地 API 和插件
+### 4. 启动本地 API
 
 ```powershell
 python api.py
@@ -136,9 +145,7 @@ API 默认监听：
 - `POST http://127.0.0.1:8000/jobs/application`
 - `GET http://127.0.0.1:8000/jobs/actions`
 
-浏览器插件位于 `browser_extension/`。启动 API 后，在 Chrome / Edge 扩展管理页选择“加载解压缩的扩展”，目录选 `browser_extension`，打开岗位详情页后点击插件导入。
-
-### 5. 启动独立前端
+### 5. 启动独立 Web 前端
 
 ```powershell
 cd frontend
@@ -158,12 +165,16 @@ npm.cmd run dev
 - 简历匹配看板：`POST /jobs/match`
 - 收藏、反馈、投递动作：`POST /jobs/bookmark` / `POST /jobs/feedback` / `POST /jobs/application`
 
+### 6. 加载浏览器插件
+
+启动 API 后，在 Chrome / Edge 扩展管理页选择“加载解压缩的扩展”，目录选 `browser_extension`。打开岗位详情页后，插件可以读取当前页面文本，并调用本地 API 导入或收藏岗位。
+
 更完整的接口和独立前端说明见：
 
 - `docs/API_REFERENCE.md`
 - `docs/FRONTEND_PRODUCT_PLAN.md`
 
-### 6. 使用 CLI
+### 7. 使用 CLI
 
 ```powershell
 python cli.py agent-search "帮我找上海 AI Agent 岗位，我是去年毕业的，薪资 20K 以内，社招和校招都可以，双休优先，不要实习。"
@@ -315,7 +326,7 @@ frontend/
   src/styles.css                    # 工作台样式
 ```
 
-## 安全策略
+## 运行边界
 
 - API Key 不写入代码，优先使用 `config.local.yaml` 或环境变量。
 - `config.local.yaml` 属于本地私密配置，不应提交。
@@ -328,7 +339,7 @@ frontend/
 - 前程无忧/猎聘浏览器列表采集默认关闭，只有显式启用才运行。
 - 需要登录、页面验证或人工确认时，系统会停在可人工处理的状态，不代替用户完成这些步骤。
 - 双休、地址、经验等字段如果平台未公开或详情页需要人工确认，会标记为未知，不会编造。
-- MVP 不做自动批量投递、自动上传简历或自动代聊 HR；BOSS 沟通只支持用户确认后的单岗位发送。
+- 当前版本不做自动批量投递、自动上传简历或自动代聊 HR；BOSS 沟通只支持用户确认后的单岗位发送。
 
 ## 常见问题
 
